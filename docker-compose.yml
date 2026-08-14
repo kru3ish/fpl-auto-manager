@@ -1,0 +1,29 @@
+services:
+  fpl:
+    build: .
+    container_name: fpl-manager
+    restart: unless-stopped
+
+    # Your refresh token lives here, on your machine. It is never in the image.
+    volumes:
+      - ./state:/app/state
+      - ./reports:/app/reports
+
+    # The image runs as uid 10001, not root. On Linux a bind mount keeps the
+    # HOST's ownership, so if ./state belongs to you the container may not be
+    # able to write to it. If you see "Permission denied" on state/, run as
+    # yourself instead -- find your ids with `id -u` and `id -g`:
+    #
+    #   user: "1000:1000"
+    #
+    # Not needed on Docker Desktop for macOS or Windows, which remaps ownership.
+
+    environment:
+      # Run times are interpreted in this timezone. Set it to yours.
+      TZ: Europe/London
+
+    # To report only and never touch your team, use:
+    #   command: ["python", "run_scheduler.py", "--dry-run"]
+    #
+    # To change the schedule:
+    #   command: ["python", "run_scheduler.py", "--at", "07:30", "--at", "18:00"]

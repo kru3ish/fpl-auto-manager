@@ -1,0 +1,6 @@
+requests>=2.31
+pulp>=2.7
+
+# Optional. Only needed for `fpl_token.py --login`, the browser fallback used
+# if the DevTools refresh-token route ever fails. Everything else works without it.
+# playwright>=1.40

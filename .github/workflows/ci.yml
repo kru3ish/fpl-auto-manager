@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  python:
+    name: Python ${{ matrix.python }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+
+      - name: Install
+        run: pip install -r requirements.txt
+
+      - name: Compile every module
+        run: python -m compileall -q fpl_*.py run_scheduler.py fpl_setup.py
+
+      - name: Import on a clean interpreter
+        run: |
+          python -c "
+          import fpl_model, fpl_optimise, fpl_write, fpl_token
+          import fpl_auto, fpl_daily, fpl_create, fpl_tracker, run_scheduler
+          print('all modules import')
+          "
+
+      - name: CBC solver works
+        run: |
+          python -c "
+          import pulp
+          p = pulp.LpProblem('t', pulp.LpMaximize)
+          x = pulp.LpVariable('x', 0, 1, cat='Binary')
+          p += x
+          p.solve(pulp.PULP_CBC_CMD(msg=0))
+          assert pulp.LpStatus[p.status] == 'Optimal', 'CBC failed'
+          print('CBC ok')
+          "
+
+      - name: CLI help works without credentials
+        run: |
+          python fpl_token.py --help    > /dev/null
+          python fpl_model.py --help    > /dev/null
+          python fpl_optimise.py --help > /dev/null
+          python fpl_daily.py --help    > /dev/null
+          python run_scheduler.py --help > /dev/null
+          echo "all entrypoints respond"
+
+      - name: Fails cleanly with no auth (no traceback)
+        run: |
+          set +e
+          out=$(python fpl_write.py --check 2>&1); code=$?
+          set -e
+          echo "$out"
+          if echo "$out" | grep -q "Traceback"; then
+            echo "::error::unauthenticated run should not traceback"; exit 1
+          fi
+          if [ "$code" -eq 0 ]; then
+            echo "::error::should exit non-zero without credentials"; exit 1
+          fi
+          echo "clean failure confirmed"
+
+  docker:
+    name: Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: fpl-auto-manager:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the image
+        run: |
+          docker run --rm fpl-auto-manager:ci python -c "import fpl_model, fpl_optimise; print('image ok')"
+          docker run --rm fpl-auto-manager:ci python run_scheduler.py --help > /dev/null
+          echo "container entrypoints work"
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: No credentials committed, ever
+        run: |
+          fail=0
+
+          # a stored auth file must never appear in the tree or in history
+          if git log --all --name-only --pretty=format: | sort -u | grep -qE "(^|/)auth\.json$|(^|/)state/"; then
+            echo "::error::state/ or auth.json is present in git history"
+            fail=1
+          fi
+
+          # A JWT is three base64url segments. Match on payload+signature, not
+          # the header -- every FPL token shares the same header (base64 of
+          # {"alg":"RS256","kid":"default"}), so header-only matches are noise.
+          # This file is excluded so the patterns cannot flag themselves.
+          if git grep -nIE "eyJ[A-Za-z0-9_-]{20,}\.eyJ[A-Za-z0-9_-]{40,}\.[A-Za-z0-9_-]{40,}" \
+               -- . ':!*.md' ':!.github/workflows'; then
+            echo "::error::a JWT looks committed"
+            fail=1
+          fi
+
+          # Provider credentials. GitHub PATs are the likely accident here:
+          # they get pasted into terminals and shell history constantly.
+          if git grep -nIE "gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{50,}" \
+               -- . ':!.github/workflows'; then
+            echo "::error::a GitHub token looks committed"
+            fail=1
+          fi
+
+          if git grep -nIE "AKIA[0-9A-Z]{16}|sk-[A-Za-z0-9]{32,}|xox[baprs]-[A-Za-z0-9-]{10,}" \
+               -- . ':!.github/workflows'; then
+            echo "::error::an AWS, OpenAI or Slack credential looks committed"
+            fail=1
+          fi
+
+          if [ "$fail" -eq 0 ]; then echo "no credentials found"; fi
+          exit $fail

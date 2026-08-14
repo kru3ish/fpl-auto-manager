@@ -1,0 +1,32 @@
+# ─── CREDENTIALS — NEVER COMMIT ────────────────────────────────────────────
+# state/auth.json holds an OIDC refresh token valid for ~180 days. Anyone with
+# it can read and MODIFY the associated FPL team until it is revoked.
+state/
+*.auth.json
+auth.json
+.env
+.env.*
+!.env.example
+
+# ─── PERSONAL DATA ─────────────────────────────────────────────────────────
+reports/
+squad_and_fixtures.json
+FPL_*_Master_Plan.md
+linkedin_post.md
+run_daily.bat
+
+# ─── PYTHON ────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# ─── OS / EDITOR ───────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
