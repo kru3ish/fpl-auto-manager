@@ -379,6 +379,51 @@ def check_legal_xi(squad, elements_by_id, alerts):
                        f"({counts['GK']} GK / {counts['DEF']} DEF / {counts['FWD']} FWD safe)."))
 
 
+def check_auth(alerts):
+    """
+    Auth health, surfaced in the ACTION LIST rather than buried below.
+
+    The write half silently sat dead for six days once because a broken token
+    chain only ever printed "AUTO OFF" in a lower section nobody reads. A dead
+    credential is an incident, not a footnote.
+    """
+    state_file = STATE / "auth_failures.json"
+    hist = json.loads(state_file.read_text(encoding="utf-8")) if state_file.exists() else {}
+    try:
+        import fpl_token
+        import fpl_write
+    except ImportError:
+        return
+
+    stored = fpl_token._read().get("refresh_token")
+    if not stored:
+        alerts.append((RED, "AUTH", "No refresh token stored — the engine cannot "
+                                    "touch your team. Run: python fpl_token.py --login"))
+        return
+
+    hours = fpl_write.token_hours_left()
+    if hours > 0.5:
+        if hist.get("consecutive"):
+            alerts.append((GREEN, "AUTH", "Token chain recovered."))
+        state_file.write_text(json.dumps({"consecutive": 0}), encoding="utf-8")
+        return
+
+    # access token is dead — can the refresh chain still mint a new one?
+    try:
+        fpl_token.exchange(stored)
+        state_file.write_text(json.dumps({"consecutive": 0}), encoding="utf-8")
+        return
+    except Exception as e:
+        n = hist.get("consecutive", 0) + 1
+        state_file.write_text(json.dumps({"consecutive": n}), encoding="utf-8")
+        days = n / 3.0                       # the scheduler fires three times a day
+        alerts.append((RED, "AUTH",
+                       f"**TOKEN CHAIN BROKEN** — {n} consecutive failures "
+                       f"(~{days:.1f} days). Your team is NOT being managed. "
+                       f"Cause: {str(e)[:90]}. "
+                       f"Fix: python fpl_token.py --login"))
+
+
 def check_deadline(deadline, alerts):
     left = deadline - now_utc()
     hours = left.total_seconds() / 3600
@@ -553,6 +598,7 @@ def main():
     alerts = []
 
     check_deadline(deadline, alerts)
+    check_auth(alerts)
     snapshot = check_flags(squad, elements_by_id, teams_by_id, prev, alerts)
     if not first_run:
         check_prices(squad, watchlist, elements_by_id, teams_by_id, prev, alerts)

@@ -159,6 +159,69 @@ def exchange(refresh_token: str):
     return access, body.get("refresh_token") or refresh_token
 
 
+def _profile_relogin():
+    """
+    Silently re-mint from the dedicated browser profile.
+
+    The whole fragility is that a refresh token obtained from YOUR everyday
+    browser shares one rotation chain with that browser. Ping rotates on every
+    exchange, so the next time you open the FPL site the SPA mints a new token
+    and ours dies. state/browser/ is a SEPARATE profile with its own Ping
+    session, so its chain is independent of your browsing -- and because the
+    session cookie long outlives the 8h token, we can re-mint headlessly with
+    no interaction at all.
+    """
+    if not PROFILE.exists():
+        return None
+    try:
+        from playwright.sync_api import sync_playwright, TimeoutError as PWTimeout
+    except ImportError:
+        return None
+    import time
+
+    found = {}
+    try:
+        with sync_playwright() as pw:
+            launch = dict(user_data_dir=str(PROFILE), headless=True,
+                          viewport={"width": 1360, "height": 900},
+                          args=["--disable-blink-features=AutomationControlled"])
+            try:
+                ctx = pw.chromium.launch_persistent_context(channel="chrome", **launch)
+            except Exception:
+                ctx = pw.chromium.launch_persistent_context(**launch)
+            page = ctx.pages[0] if ctx.pages else ctx.new_page()
+
+            def on_request(req):
+                a = req.headers.get("x-api-authorization", "")
+                if "tok" not in found and a.lower().startswith("bearer "):
+                    found["tok"] = a.split(None, 1)[1]
+
+            page.on("request", on_request)
+            try:
+                page.goto("https://fantasy.premierleague.com/my-team",
+                          wait_until="domcontentloaded", timeout=45000)
+            except PWTimeout:
+                pass
+            deadline = time.time() + 45
+            while time.time() < deadline and "tok" not in found:
+                page.wait_for_timeout(500)
+            try:
+                rt = page.evaluate(
+                    "Object.entries(localStorage).filter(([k])=>k.startsWith('oidc.user'))"
+                    ".map(([,v])=>JSON.parse(v).refresh_token)[0] || null")
+                if rt:
+                    d = _read(); d["refresh_token"] = rt; _write(d)
+            except Exception:
+                pass
+            try:
+                ctx.close()
+            except Exception:
+                pass
+    except Exception:
+        return None
+    return found.get("tok")
+
+
 def do_refresh(force=False):
     d = _read()
     rt = d.get("refresh_token")
@@ -184,6 +247,14 @@ def do_refresh(force=False):
             if old_jti not in d["consumed_jti"]:
                 d["consumed_jti"] = (d["consumed_jti"] + [old_jti])[-20:]
                 _write(d)
+        # self-heal from the isolated profile before troubling the human
+        healed = _profile_relogin()
+        if healed:
+            fpl_write.save_token(healed)
+            print("chain was broken; re-minted from the isolated browser profile")
+            _report()
+            return True
+
         print(f"REFRESH FAILED - {e}")
         if "does not exist" in str(e) or "invalid_grant" in str(e):
             print("\nThat refresh token was already used. Rotation kills the old one,")
