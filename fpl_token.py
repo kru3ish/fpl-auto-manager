@@ -307,7 +307,10 @@ def do_login():
     STATE.mkdir(exist_ok=True)
     PROFILE.mkdir(parents=True, exist_ok=True)
     found = {}
+    existing = _read().get("token")
+    old_sid = fpl_write.decode_jwt(existing).get("sid") if existing else None
     print("A browser opens. Log in; this window closes itself once it sees a token.")
+    print("This profile keeps its own session, so it survives your normal browsing.")
 
     with sync_playwright() as pw:
         launch = dict(user_data_dir=str(PROFILE), headless=False,
@@ -355,6 +358,20 @@ def do_login():
 
     if not found:
         sys.exit("No token seen. Did the login complete?")
+
+    # The whole point is a SEPARATE Ping session. If the new token carries the
+    # same sid as the old one, isolation failed and the chain will break again
+    # the next time the everyday browser re-authenticates.
+    new_sid = fpl_write.decode_jwt(found["tok"]).get("sid")
+    if old_sid and new_sid == old_sid:
+        print("! WARNING: same Ping session as before (sid unchanged).")
+        print("  This token will still die when your normal browser re-auths.")
+        print("  Log out of Premier League in the automation window and retry.")
+    elif new_sid:
+        print(f"isolated session established: {new_sid[:8]}"
+              + (f" (was {old_sid[:8]})" if old_sid else ""))
+        print("your everyday browsing can no longer break this chain.")
+
     fpl_write.save_token(found["tok"])
     _report()
 

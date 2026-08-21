@@ -185,6 +185,40 @@ chain breaks on the next run. Your browser also caches the dead copy, so
 re-reading `localStorage` after a failed exchange hands you the same expired
 token again; hard-reload the page first.
 
+### Use a separate browser for the token. This matters more than anything else here.
+
+Every token carries a `sid` -- the Ping **session** it belongs to. Refresh-token
+rotation is per-token, but **revocation is per-session**: when a session
+re-authenticates, every token issued under it dies at once.
+
+So if you copy the refresh token out of the browser you actually play FPL in,
+you are sharing a session with that browser. The next time you open the site,
+its SPA re-auths, and your automation's token is revoked. It will look like the
+tool broke on its own, days later, for no reason.
+
+**Do this instead.** Log in to FPL in a browser you do not otherwise use --
+a second browser, or a fresh profile -- and take the refresh token from there.
+Then never browse FPL in it again.
+
+```bash
+python fpl_token.py --login    # drives its own isolated profile, and verifies
+                               # the new sid differs from the old one
+```
+
+`--login` is the durable version: because the script owns that profile, it can
+re-mint headlessly when the chain breaks, without you. Taking the token from a
+second browser by hand also works and needs no Playwright -- you just lose the
+self-healing.
+
+To check which session you are on:
+
+```bash
+python -c "import fpl_token,fpl_write;print(fpl_write.decode_jwt(fpl_token._read()['token'])['sid'])"
+```
+
+If that matches the session in your everyday browser, it will break. If it
+differs, your browsing cannot touch it.
+
 **Endpoints**
 
 | Endpoint | Auth | Returns |
@@ -256,6 +290,14 @@ said FPL's own projections beat this model, 0.323 to 0.212. The error was in the
 benchmark: per-*gameweek* expected points were being compared against per-*start*
 actuals, injecting start probability as pure noise. Corrected, the same model
 scored 0.867.
+
+**5. Session-scoped revocation.** The write half sat dead for six days without
+anyone noticing. A refresh token taken from the everyday browser shared a Ping
+session with it; the first visit to the FPL site revoked the whole session. The
+report said `AUTO OFF` in a section nobody reads -- a silent failure in the one
+component whose entire job is not failing silently. Fixed twice over: the token
+now comes from an isolated session, and a broken chain raises a `RED` alert at
+the top of the action list with a running count of consecutive failures.
 
 Measure carefully. The wrong yardstick will make you throw away working code.
 
