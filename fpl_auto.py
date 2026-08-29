@@ -49,12 +49,38 @@ def _cop(p):
     return 100 if v is None else v
 
 
+def model_confidence():
+    """
+    0..1 — how much the expected-points model has actually learned this season.
+
+    Every per-90 rate shrinks toward the positional prior, so after one or two
+    gameweeks EVERY player scores about the same and the ranking is noise. Price
+    is the market's aggregated judgement and is a far better signal that early,
+    so we blend toward it when the model has nothing to say.
+    """
+    try:
+        boot = M.load("cache_bootstrap.json")
+        played = sum(1 for e in boot["events"] if e.get("finished"))
+    except Exception:
+        return 1.0
+    if played == 0:          # pre-season: bootstrap carries last season's totals
+        return 1.0
+    return max(0.0, min(1.0, played / 8.0))
+
+
+def _rank_score(p, ep, conf):
+    """Blend modelled expected points with price, weighted by model confidence."""
+    price_proxy = (p["now_cost"] / 10.0) * 2.5     # ~same scale as 6-GW EP
+    return conf * ep + (1 - conf) * price_proxy
+
+
 # ----------------------------------------------------------------- lineup calc
 def plan_lineup(team, elements_by_id, fixtures_by_team, ep_by_id):
     """
     Build the best legal XI from the 15 you already own.
     Returns (picks_payload, changes[]) or (None, []) if nothing needs changing.
     """
+    conf = model_confidence()
     squad = []
     for pk in team["picks"]:
         p = elements_by_id[pk["element"]]
@@ -63,8 +89,8 @@ def plan_lineup(team, elements_by_id, fixtures_by_team, ep_by_id):
         has_fixture = bool(fx)
         fdr = fx[0]["difficulty"] if fx else 5
 
-        # score on modelled expected points, not vibes
-        score = ep_by_id.get(p["id"], 0.0)
+        # modelled expected points, blended toward price while the model is thin
+        score = _rank_score(p, ep_by_id.get(p["id"], 0.0), conf)
         if not has_fixture:
             score -= 50                      # blank gameweek: bench him
         if cop <= SELL_THRESHOLD:
@@ -78,8 +104,23 @@ def plan_lineup(team, elements_by_id, fixtures_by_team, ep_by_id):
             "was_pos": pk["position"], "playable": cop > SELL_THRESHOLD and has_fixture,
         })
 
+    # MINIMAL INTERVENTION.
+    #
+    # The engine's job is to fix problems, not to re-optimise a working XI every
+    # day on noisy data. Early in a season the model has almost no discrimination
+    # -- every per-90 rate shrinks to the same positional prior -- and left to
+    # rank freely it once benched a 12.0m midfielder in favour of 4.5m fodder and
+    # made that fodder vice-captain. A lineup change is only justified when
+    # somebody in the XI genuinely cannot play.
+    unplayable = [x for x in squad if x["was_start"] and not x["playable"]]
+    if not unplayable:
+        return None, []
+
     gks = sorted([s for s in squad if s["pos"] == "GK"], key=lambda s: -s["score"])
     outs = sorted([s for s in squad if s["pos"] != "GK"], key=lambda s: -s["score"])
+    # keep whoever is already starting and fine, ahead of anyone on the bench
+    for lst in (gks, outs):
+        lst.sort(key=lambda s: (not (s["was_start"] and s["playable"]), -s["score"]))
 
     xi = [gks[0]]
     counts = defaultdict(int, {"GK": 1})
@@ -202,7 +243,7 @@ def plan_transfer(team, elements_by_id, teams_by_id, fixtures_by_team, gw, ep_by
             continue
         if not fixtures_by_team.get(p["team"]):
             continue
-        score = ep_by_id.get(p["id"], 0.0)
+        score = _rank_score(p, ep_by_id.get(p["id"], 0.0), model_confidence())
         if score > best_score:
             best, best_score = p, score
 
@@ -294,6 +335,10 @@ def run(elements_by_id, teams_by_id, fixtures_by_team, gw, deadline, apply=False
 
     # ---- lineup
     picks, changes = plan_lineup(team, elements_by_id, fixtures_by_team, ep_by_id)
+    if picks is None:
+        out.append("Lineup untouched — everyone in the XI can play "
+                   "(the engine only intervenes when someone genuinely can't).")
+        return out
     if not changes:
         out.append("Lineup already optimal — no changes.")
         return out

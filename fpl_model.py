@@ -55,6 +55,12 @@ PROMOTED_ATTACK, PROMOTED_DEFENCE = 0.72, 1.32   # COV / HUL / IPS have no PL da
 _RATINGS: dict | None = None
 
 
+def matches_played(boot):
+    """League matches played so far. 38 in pre-season, when stats are last season's."""
+    finished = sum(1 for e in boot["events"] if e.get("finished"))
+    return 38 if finished == 0 else finished
+
+
 def team_ratings(boot):
     """(attack, defence) multipliers per team id, 1.0 == league average."""
     global _RATINGS
@@ -68,15 +74,34 @@ def team_ratings(boot):
             gc_num[p["team"]] += f(p["expected_goals_conceded_per_90"]) * p["minutes"]
             gc_den[p["team"]] += p["minutes"]
 
-    established = [t["id"] for t in boot["teams"] if gc_den[t["id"]] > 0 and xg[t["id"]] > 5]
-    avg_xg = sum(xg[i] for i in established) / len(established) / 38.0
+    # Thresholds must scale with how much football has been played. In pre-season
+    # bootstrap-static carries LAST season's totals, so every club clears a fixed
+    # bar. The moment GW1 finishes those fields reset to this season's numbers and
+    # a fixed bar excludes everyone -- which used to divide by zero and take the
+    # whole engine down. Scale the bar by matches played, and fall back to neutral
+    # ratings when there genuinely isn't enough football yet to say anything.
+    played = matches_played(boot)
+    min_xg = max(0.5, 0.35 * played)
+    established = [t["id"] for t in boot["teams"]
+                   if gc_den[t["id"]] > 0 and xg[t["id"]] >= min_xg]
+
+    if len(established) < 6:
+        # too little signal: treat every club as league-average rather than guess
+        _RATINGS = {t["id"]: (1.0, 1.0) for t in boot["teams"]}
+        return _RATINGS
+
+    scale = float(max(1, played))
+    avg_xg = sum(xg[i] for i in established) / len(established) / scale
     avg_gc = sum(gc_num[i] / gc_den[i] for i in established) / len(established)
+    if avg_xg <= 0 or avg_gc <= 0:
+        _RATINGS = {t["id"]: (1.0, 1.0) for t in boot["teams"]}
+        return _RATINGS
 
     out = {}
     for t in boot["teams"]:
         i = t["id"]
         if i in established:
-            out[i] = ((xg[i] / 38.0) / avg_xg, (gc_num[i] / gc_den[i]) / avg_gc)
+            out[i] = ((xg[i] / scale) / avg_xg, (gc_num[i] / gc_den[i]) / avg_gc)
         else:
             out[i] = (PROMOTED_ATTACK, PROMOTED_DEFENCE)
     _RATINGS = out
@@ -138,9 +163,13 @@ def positional_priors(boot):
     global _PRIORS
     if _PRIORS is not None:
         return _PRIORS
+    # Same problem as team_ratings: a fixed 900-minute bar matches nobody once
+    # the season resets the counters. Scale it to the football actually played.
+    played = matches_played(boot)
+    bar = max(60, int(REGULAR_MINUTES * played / 38.0))
     acc = defaultdict(lambda: defaultdict(list))
     for p in boot["elements"]:
-        if p["minutes"] < REGULAR_MINUTES or p["starts"] == 0:
+        if p["minutes"] < bar or p["starts"] == 0:
             continue
         pos = POS[p["element_type"]]
         acc[pos]["xg90"].append(f(p["expected_goals_per_90"]))
@@ -152,6 +181,23 @@ def positional_priors(boot):
         acc[pos]["bonus_rate"].append(p["bonus"] / p["starts"])
     _PRIORS = {pos: {k: (sum(v) / len(v) if v else 0.0) for k, v in d.items()}
                for pos, d in acc.items()}
+    # If a position produced nothing at all, fall back to sane league defaults so
+    # downstream shrinkage still has something to pull toward.
+    DEFAULTS = {
+        "GK":  {"xg90": 0.0, "xa90": 0.0, "dc90": 0.5, "saves90": 3.0,
+                "gc90": 1.4, "cs_rate": 0.28, "bonus_rate": 0.25},
+        "DEF": {"xg90": 0.06, "xa90": 0.06, "dc90": 7.8, "saves90": 0.0,
+                "gc90": 1.4, "cs_rate": 0.28, "bonus_rate": 0.25},
+        "MID": {"xg90": 0.16, "xa90": 0.13, "dc90": 8.4, "saves90": 0.0,
+                "gc90": 1.4, "cs_rate": 0.28, "bonus_rate": 0.30},
+        "FWD": {"xg90": 0.43, "xa90": 0.06, "dc90": 4.5, "saves90": 0.0,
+                "gc90": 1.4, "cs_rate": 0.28, "bonus_rate": 0.60},
+    }
+    for pos, defaults in DEFAULTS.items():
+        cur = _PRIORS.setdefault(pos, {})
+        for k, v in defaults.items():
+            if not cur.get(k):
+                cur[k] = v
     return _PRIORS
 
 
