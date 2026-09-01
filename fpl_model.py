@@ -61,6 +61,29 @@ def matches_played(boot):
     return 38 if finished == 0 else finished
 
 
+def fpl_strength_prior(boot):
+    """
+    FPL publishes its own 1-5 team strength, split home/away, and populates it
+    from day one -- unlike strength_attack_* / strength_defence_*, which sit at
+    zero all season. Deriving ratings from this season's xG needs ~6 gameweeks
+    before it says anything; until then every club rated 1.00 and the model could
+    not tell Coventry from Liverpool. This is the prior that fills that gap.
+
+    Returns {team_id: (atk_home, def_home, atk_away, def_away)}, 1.0 = average.
+    """
+    out = {}
+    for t in boot["teams"]:
+        sh = t.get("strength_overall_home") or 3
+        sa = t.get("strength_overall_away") or 3
+        out[t["id"]] = (
+            1.0 + 0.22 * (sh - 3),   # attack at home
+            1.0 - 0.18 * (sh - 3),   # defence at home (lower = better)
+            1.0 + 0.22 * (sa - 3),
+            1.0 - 0.18 * (sa - 3),
+        )
+    return out
+
+
 def team_ratings(boot):
     """(attack, defence) multipliers per team id, 1.0 == league average."""
     global _RATINGS
@@ -85,9 +108,16 @@ def team_ratings(boot):
     established = [t["id"] for t in boot["teams"]
                    if gc_den[t["id"]] > 0 and xg[t["id"]] >= min_xg]
 
+    prior = fpl_strength_prior(boot)
+    # Blend published strength with xG-derived ratings as evidence accumulates.
+    # w=0 at kickoff (pure prior), w=1 by GW8 (pure derived).
+    w = max(0.0, min(1.0, played / 8.0)) if played < 38 else 1.0
+
     if len(established) < 6:
-        # too little signal: treat every club as league-average rather than guess
-        _RATINGS = {t["id"]: (1.0, 1.0) for t in boot["teams"]}
+        # Not enough xG yet to derive anything -- lean entirely on the prior
+        # rather than flattening every club to 1.00.
+        _RATINGS = {i: ((a_h + a_a) / 2, (d_h + d_a) / 2)
+                    for i, (a_h, d_h, a_a, d_a) in prior.items()}
         return _RATINGS
 
     scale = float(max(1, played))
@@ -100,10 +130,14 @@ def team_ratings(boot):
     out = {}
     for t in boot["teams"]:
         i = t["id"]
+        pa = (prior[i][0] + prior[i][2]) / 2
+        pd = (prior[i][1] + prior[i][3]) / 2
         if i in established:
-            out[i] = ((xg[i] / scale) / avg_xg, (gc_num[i] / gc_den[i]) / avg_gc)
+            da = (xg[i] / scale) / avg_xg
+            dd = (gc_num[i] / gc_den[i]) / avg_gc
+            out[i] = (w * da + (1 - w) * pa, w * dd + (1 - w) * pd)
         else:
-            out[i] = (PROMOTED_ATTACK, PROMOTED_DEFENCE)
+            out[i] = (pa, pd)
     _RATINGS = out
     return out
 
@@ -201,14 +235,36 @@ def positional_priors(boot):
     return _PRIORS
 
 
-def shrunk(p, field, prior_key, priors, k=SHRINK_K):
+def effective_k(played):
+    """
+    How much evidence before a player's own rate outweighs the positional mean.
+
+    K=250 was calibrated on FULL-SEASON data, where 250 minutes is a small slice
+    of 3,000. Two gameweeks in, EVERY player has ~180 minutes, so that same K
+    hands 42% weight to a two-game sample -- and the model started recommending
+    three Hull defenders because a promoted side had kept two clean sheets.
+    Early-season spread between players is almost entirely noise, so the bar for
+    moving off the prior has to be much higher until real football accumulates.
+
+      2 GWs  -> K~4750, a 180-minute sample gets ~4% weight
+      8 GWs  -> K~1190, a 720-minute sample gets ~38%
+     38 GWs  -> K=250,  a full season gets ~92%
+    """
+    return SHRINK_K * 38.0 / max(1.0, played)
+
+
+def shrunk(p, field, prior_key, priors, k=None):
     """A player's per-90 rate, pulled toward the positional mean by sample size."""
     pos = POS[p["element_type"]]
     own = f(p.get(field))
     prior = priors.get(pos, {}).get(prior_key, 0.0)
     mins = p["minutes"]
-    w = mins / (mins + k)
+    kk = k if k is not None else effective_k(_PLAYED[0])
+    w = mins / (mins + kk)
     return w * own + (1 - w) * prior
+
+
+_PLAYED = [38]          # matches played so far; set by score_all()
 
 
 def minutes_profile(p):
@@ -226,7 +282,9 @@ def minutes_profile(p):
         p_start = 0.15 if p["now_cost"] <= 45 else 0.35
         mins_if_start, p60_given_start = 70.0, 0.70
     else:
-        p_start = min(1.0, starts / 38.0)
+        # starts/38 assumes a completed season. Two starts out of two played is
+        # a nailed starter, not a 5% chance -- divide by matches actually played.
+        p_start = min(1.0, starts / float(max(1, _PLAYED[0])))
         mins_if_start = min(90.0, mins / starts)
         if mins_if_start >= 80:
             p60_given_start = 0.95
@@ -272,7 +330,7 @@ def clean_sheet_probability(p, fdr, priors):
         return 0.0
     prior = priors.get(pos, {}).get("cs_rate", 0.25)
     own = p["clean_sheets"] / p["starts"] if p["starts"] else prior
-    w = p["minutes"] / (p["minutes"] + SHRINK_K)
+    w = p["minutes"] / (p["minutes"] + effective_k(_PLAYED[0]))
     base = w * own + (1 - w) * prior
     return max(0.0, min(0.85, base * CS_MULT.get(fdr, 1.0)))
 
@@ -293,7 +351,7 @@ def expected_points(p, fixtures, priors, ratings=None):
     xa90 = shrunk(p, "expected_assists_per_90", "xa90", priors)
     saves90 = shrunk(p, "saves_per_90", "saves90", priors)
     gc90 = shrunk(p, "goals_conceded_per_90", "gc90", priors)
-    w = p["minutes"] / (p["minutes"] + SHRINK_K)
+    w = p["minutes"] / (p["minutes"] + effective_k(_PLAYED[0]))
     bonus_prior = priors.get(pos, {}).get("bonus_rate", 0.0)
     own_bonus = p["bonus"] / starts if p["starts"] else bonus_prior
     bonus_per_start = w * own_bonus + (1 - w) * bonus_prior
@@ -356,6 +414,7 @@ def build_fixtures(horizon=6, start_gw=None):
 
 
 def score_all(boot, fixtures, horizon):
+    _PLAYED[0] = matches_played(boot)
     priors = positional_priors(boot)
     ratings = team_ratings(boot)
     rows = []
