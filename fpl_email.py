@@ -166,8 +166,10 @@ SMTP_FILE = STATE / "smtp.json"
 SENT_FILE = STATE / "last_email.json"
 
 
-def setup_smtp():
+def setup_smtp(addr=None, pw=None):
     """Store Gmail SMTP credentials. App password, not your Google password."""
+    if addr and pw:
+        return _store_smtp(addr, pw)
     print("""Gmail needs an APP PASSWORD, not your account password.
 
   1. Google Account -> Security -> 2-Step Verification (must be on)
@@ -178,7 +180,12 @@ This credential can ONLY send mail. It cannot read your inbox and has no
 access to your FPL account. It is stored in state/smtp.json (gitignored).
 """)
     addr = input("Your Gmail address: ").strip()
-    pw = input("16-character app password: ").strip().replace(" ", "")
+    pw = input("16-character app password: ").strip()
+    return _store_smtp(addr, pw)
+
+
+def _store_smtp(addr, pw):
+    pw = pw.replace(" ", "")
     if not addr or len(pw) < 12:
         sys.exit("cancelled - address or app password looks wrong")
     STATE.mkdir(exist_ok=True)
@@ -192,6 +199,49 @@ access to your FPL account. It is stored in state/smtp.json (gitignored).
     ok, err = send(subject="FPL auto-manager: test", body_html="<p>Working.</p>",
                    body_text="Working.")
     print("  sent - check your inbox" if ok else f"  FAILED: {err}")
+
+
+def action_headline():
+    """First line of today's action list -- what the toast actually needs to say."""
+    reports = sorted((ROOT / "reports").glob("*.md")) if (ROOT / "reports").is_dir() else []
+    if not reports:
+        return "Daily check complete."
+    lines = reports[-1].read_text(encoding="utf-8").splitlines()
+    for i, ln in enumerate(lines):
+        if ln.strip().lower().startswith("## action"):
+            for nxt in lines[i + 1:]:
+                t = nxt.strip().lstrip("-* ").strip()
+                if t and not t.startswith("#"):
+                    return t[:200]
+    return "Daily check complete."
+
+
+def notify_desktop(title, message):
+    """
+    Delivery path of last resort. Email needs a credential; a toast on the
+    machine that just ran the job needs nothing. If SMTP is not configured the
+    briefing still has to reach a human somehow -- a report written to disk that
+    nobody is told about is the same as no report at all.
+    """
+    import subprocess
+    ps = (
+        "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');"
+        "$n=New-Object System.Windows.Forms.NotifyIcon;"
+        "$n.Icon=[System.Drawing.SystemIcons]::Information;"
+        "$n.BalloonTipTitle=" + _ps_quote(title) + ";"
+        "$n.BalloonTipText=" + _ps_quote(message) + ";"
+        "$n.Visible=$true;$n.ShowBalloonTip(20000);Start-Sleep -Seconds 12;$n.Dispose()"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
+                       timeout=40, capture_output=True)
+        return True
+    except Exception:
+        return False
+
+
+def _ps_quote(v):
+    return "'" + str(v).replace("'", "''") + "'"
 
 
 def send(subject, body_html, body_text):
@@ -239,6 +289,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--open", action="store_true")
     ap.add_argument("--setup-smtp", action="store_true", help="store Gmail app password")
+    ap.add_argument("--address", help="with --setup-smtp: Gmail address (skips the prompt)")
+    ap.add_argument("--password", help="with --setup-smtp: 16-char app password (skips the prompt)")
     ap.add_argument("--send", action="store_true", help="email the briefing")
     ap.add_argument("--once-daily", action="store_true",
                     help="with --send: skip if one already went out today. The "
@@ -247,7 +299,7 @@ def main():
     args = ap.parse_args()
 
     if args.setup_smtp:
-        setup_smtp()
+        setup_smtp(args.address, args.password)
         return
     body, gw, total, rank, pct = build()
     (ROOT / "email.html").write_text(body, encoding="utf-8")
@@ -270,9 +322,20 @@ def main():
         if ok:
             mark_sent()
             print("emailed")
-        else:
-            print(f"email FAILED: {err}")
-            sys.exit(1)
+            return
+
+        # A missing credential is a configuration state, not a fault -- fall back
+        # to the desktop and exit clean. A configured mailer that fails IS a
+        # fault, and stays loud, because that is the case where the briefing is
+        # silently going nowhere and nobody would know.
+        print(f"email FAILED: {err}")
+        headline = action_headline()
+        if notify_desktop(f"FPL GW{gw} - {total} pts, OR {rank:,}", headline):
+            print("notified via desktop instead")
+        if not SMTP_FILE.exists():
+            mark_sent()
+            return
+        sys.exit(1)
 
 
 if __name__ == "__main__":
