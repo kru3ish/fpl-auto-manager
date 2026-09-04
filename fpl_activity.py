@@ -144,11 +144,13 @@ def rejected(boot, rows, mine, horizon=6, free_transfers=None):
     # less than he now costs, and using now_cost silently inflates every budget.
     # This used to fail open into that wrong answer, so it now reports the
     # breakage instead of quietly costing accuracy.
+    tr_raw = {}
     bank, sell, entry = 0, {}, json.loads(
         (STATE / "config.json").read_text(encoding="utf-8"))["team_id"]
     try:
         import fpl_write
         team = fpl_write.my_team(entry)
+        tr_raw = team["transfers"]
         bank = team["transfers"]["bank"]
         sell = {p["element"]: p["selling_price"] for p in team["picks"]}
         if free_transfers is None:
@@ -218,7 +220,7 @@ def rejected(boot, rows, mine, horizon=6, free_transfers=None):
             per[c["out_id"]] = (c["gain"], c["in"])
 
     return {"top": cands[:3], "why": why, "threshold": TRANSFER_THRESHOLD_EP,
-            "per_player": per, "confidence": conf,
+            "per_player": per, "confidence": conf, "transfers": tr_raw,
             "free_transfers": free_transfers, "bank": bank / 10,
             "vetoed": len(blocked)}
 

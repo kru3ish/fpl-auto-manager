@@ -310,11 +310,13 @@ def main():
         results.append(line)
 
     if args.apply and results:
+        # Confirm with the whole briefing, not a receipt. The question after
+        # "did it work" is "so what does the team look like now", and answering
+        # only the first leaves the owner opening the site to see the second.
         try:
             import fpl_email as E
-            E.send(subject="FPL: command received",
-                   body_html="<p>" + "<br>".join(results) + "</p>",
-                   body_text="\n".join(results))
+            ok, err = E.send_briefing(banner=" &middot; ".join(results))
+            print("confirmed by email" if ok else f"confirmation failed: {err}")
         except Exception as exc:
             print(f"could not confirm by email: {exc}")
 

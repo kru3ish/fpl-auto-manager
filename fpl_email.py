@@ -20,6 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import fpl_model as M
 import fpl_auto
+import re
 import urllib.parse
 import fpl_activity
 import fpl_inbox
@@ -78,12 +79,26 @@ def _why_held(p, r, decision):
             f'&middot; held at {int(decision["confidence"] * 100)}% conf</span>')
 
 
+def send_briefing(banner=None, subject=None):
+    """
+    Send the whole briefing, optionally topped with a confirmation banner.
+
+    A command deserves the same report as a scheduled run, not a one-line
+    receipt: the point of confirming an action is showing the squad it produced.
+    """
+    body, gw, total, rank, pct = build(banner=banner)
+    (ROOT / "email.html").write_text(body, encoding="utf-8")
+    text = re.sub(r"<[^>]+>", " ", body)
+    text = re.sub(r"\s+", " ", html.unescape(text)).strip()
+    return send(subject or f"FPL GW{gw} - {total} pts, OR {rank:,}", body, text)
+
+
 def _fdr_col(d):
     """Fixture difficulty 1-5. Green is an easy game, red is a hard one."""
     return {1: "#4ade80", 2: "#86efac", 3: "#94a3b8", 4: "#fb923c", 5: "#f87171"}.get(d, "#94a3b8")
 
 
-def build():
+def build(banner=None):
     boot, fx, gw = M.build_fixtures(6)
     rows = M.score_all(boot, fx, 6)
     by = {r["p"]["id"]: r for r in rows}
@@ -122,6 +137,13 @@ def build():
 
     out = []
     A = out.append
+    if banner:
+        A(f'<div style="margin-top:18px;padding:14px 16px;background:#16301f;'
+          f'border-left:3px solid {C["good"]};border-radius:6px;">'
+          f'<div style="color:{C["good"]};font-size:11px;font-weight:700;'
+          f'letter-spacing:1px;">DONE &mdash; YOUR INSTRUCTION WAS CARRIED OUT</div>'
+          f'<div style="color:{C["txt"]};font-size:14px;margin-top:6px;line-height:1.5;">'
+          f'{banner}</div></div>')
 
     A(f'<div style="background:{C["bg"]};padding:24px 12px;font-family:-apple-system,'
       f'BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;">'
@@ -282,6 +304,41 @@ def build():
             f'live prices and fitness before anything is applied. Ignore this and the engine '
             f'carries on by itself &mdash; the override is yours to use, not to maintain.'
             f'</div></div>')
+
+    # --- transfer economics ----------------------------------------------
+    tr = decision.get("transfers") or {}
+    limit, made = tr.get("limit", 0), tr.get("made", 0)
+    left, nxt = max(0, limit - made), tr.get("cost", 4)
+    A(f'<div style="color:{C["txt"]};font-size:13px;font-weight:700;letter-spacing:1px;'
+      f'margin:26px 0 10px;">TRANSFER BUDGET</div>'
+      f'<table width="100%" cellspacing="0" cellpadding="0" '
+      f'style="border-collapse:collapse;font-size:13px;">'
+      f'<tr>'
+      f'<td style="padding:10px 4px;"><div style="color:{C["dim"]};font-size:10px;'
+      f'letter-spacing:1px;">FREE LEFT</div>'
+      f'<div style="color:{C["accent"] if left else C["warn"]};font-size:22px;'
+      f'font-weight:800;">{left}</div></td>'
+      f'<td style="padding:10px 4px;"><div style="color:{C["dim"]};font-size:10px;'
+      f'letter-spacing:1px;">USED THIS GW</div>'
+      f'<div style="color:{C["txt"]};font-size:22px;font-weight:800;">{made}</div></td>'
+      f'<td style="padding:10px 4px;"><div style="color:{C["dim"]};font-size:10px;'
+      f'letter-spacing:1px;">NEXT COSTS</div>'
+      f'<div style="color:{C["warn"] if not left else C["accent"]};font-size:22px;'
+      f'font-weight:800;">{"free" if left else f"-{nxt}"}</div></td>'
+      f'<td style="padding:10px 4px;"><div style="color:{C["dim"]};font-size:10px;'
+      f'letter-spacing:1px;">IN THE BANK</div>'
+      f'<div style="color:{C["txt"]};font-size:22px;font-weight:800;">'
+      f'&pound;{tr.get("bank", 0) / 10:.1f}m</div></td>'
+      f'<td style="padding:10px 4px;"><div style="color:{C["dim"]};font-size:10px;'
+      f'letter-spacing:1px;">SQUAD VALUE</div>'
+      f'<div style="color:{C["txt"]};font-size:22px;font-weight:800;">'
+      f'&pound;{tr.get("value", 0) / 10:.1f}m</div></td></tr></table>'
+      f'<div style="color:{C["dim"]};font-size:11px;line-height:1.5;margin-top:6px;">'
+      + (f'No free transfers left this gameweek &mdash; anything further costs '
+         f'{nxt} points. One more is earned at the next deadline, and up to five '
+         f'can be banked.' if not left else
+         f'{left} free transfer(s) in hand. Unused ones roll over, up to five banked.')
+      + f'</div>')
 
     # --- proof of life ---------------------------------------------------
     runs = " &middot; ".join(f'{t:%d %b %H:%M}' for t in hb["runs"][:4]) or "no runs recorded yet"
@@ -472,7 +529,7 @@ def main():
         setup_smtp(args.address, args.password)
         return
     fpl_activity.beat()
-    body, gw, total, rank, pct = build()
+    body, gw, total, rank, pct = build(banner=None)
     (ROOT / "email.html").write_text(body, encoding="utf-8")
     print(f"email.html written ({len(body)} bytes)")
     print(f"GW{gw} | {total} pts | OR {rank:,} | model confidence {pct}%")
