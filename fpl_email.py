@@ -20,6 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import fpl_model as M
 import fpl_auto
+import fpl_activity
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state"
@@ -27,13 +28,19 @@ UA = {"User-Agent": "Mozilla/5.0"}
 ENTRY = 4330346
 
 C = dict(bg="#0f1420", card="#181e2e", line="#2a3247", txt="#e8ecf5",
-         dim="#8b95ad", accent="#00e0a0", warn="#ffb020", pink="#ff2882")
+         dim="#8b95ad", accent="#00e0a0", warn="#ffb020", pink="#ff2882",
+         good="#4ade80")
 
 
 def fetch(path):
     return json.load(urllib.request.urlopen(
         urllib.request.Request("https://fantasy.premierleague.com/api/" + path,
                                headers=UA), timeout=30))
+
+
+def _fdr_col(d):
+    """Fixture difficulty 1-5. Green is an easy game, red is a hard one."""
+    return {1: "#4ade80", 2: "#86efac", 3: "#94a3b8", 4: "#fb923c", 5: "#f87171"}.get(d, "#94a3b8")
 
 
 def build():
@@ -55,6 +62,21 @@ def build():
     squad = sorted((by[i] for i in mine if i in by),
                    key=lambda r: (r["p"]["element_type"], -r["ep_game"]))
     xi = {r["p"]["id"] for r in sorted(squad, key=lambda r: -r["ep_game"])[:11]}
+
+    acts = fpl_activity.applied(boot)
+    decision = fpl_activity.rejected(boot, rows, mine, 6)
+    hb = fpl_activity.heartbeat()
+
+    recent = [a for a in acts
+              if (now - a["ts"]).days < 4 and a["type"] in ("TRANSFER", "CAPTAIN")]
+    if recent:
+        did = "; ".join(f'{a["type"].lower()} {a["what"]}' for a in recent[:3])
+        verdict = (f'Acted since your last briefing &mdash; {html.escape(did)}. '
+                   f'Nothing further is required before the deadline.')
+    else:
+        verdict = ('No action taken. Every player is fit, nobody is flagged, and the '
+                   'lineup is unchanged. The engine only intervenes when a starter '
+                   'genuinely cannot play &mdash; see below for what it considered.')
 
     out = []
     A = out.append
@@ -102,8 +124,7 @@ def build():
       f'<div style="color:{C["accent"]};font-size:12px;font-weight:700;letter-spacing:1px;">'
       f'TODAY&rsquo;S VERDICT</div>'
       f'<div style="color:{C["txt"]};font-size:15px;margin-top:8px;line-height:1.55;">'
-      f'No action needed. Every player is fit, nobody is flagged, and the lineup is '
-      f'unchanged. The engine only intervenes when a starter genuinely cannot play.</div></div>')
+      f'{verdict}</div></div>')
 
     A(f'<div style="color:{C["txt"]};font-size:13px;font-weight:700;letter-spacing:1px;'
       f'margin:22px 0 10px;">SQUAD &middot; EXPECTED POINTS (next 6 GW)</div>'
@@ -118,7 +139,10 @@ def build():
         start = p["id"] in xi
         dc = r["breakdown"].get("defcon", 0) / max(1, len(r["fixtures"]))
         col = C["txt"] if start else C["dim"]
-        run = " ".join(f'{f["opp"]}{f["ha"]}' for f in r["fixtures"][:4])
+        run = " ".join(
+            f'<span style="color:{_fdr_col(f["difficulty"])};">'
+            f'{f["opp"]}<span style="opacity:.55;">({f["ha"]})</span></span>'
+            for f in r["fixtures"][:4])
         tag = "" if start else ' <span style="font-size:10px;color:#5a6478;">BENCH</span>'
         A(f'<tr style="border-top:1px solid {C["line"]};">'
           f'<td style="padding:9px 4px;color:{col};font-weight:{"600" if start else "400"};">'
@@ -148,6 +172,60 @@ def build():
       f'Only {played} gameweek(s) played. Every per-90 rate is still shrunk heavily toward the '
       f'positional average, so rankings lean on price as much as on form. Treat these numbers as '
       f'directional until roughly GW8.</div></div>')
+
+    # --- what it did -----------------------------------------------------
+    A(f'<div style="color:{C["txt"]};font-size:13px;font-weight:700;letter-spacing:1px;'
+      f'margin:26px 0 10px;">DECISIONS APPLIED &middot; LAST 21 DAYS</div>')
+    if acts:
+        A('<table width="100%" cellspacing="0" cellpadding="0" '
+          'style="border-collapse:collapse;font-size:13px;">')
+        for a in acts[:8]:
+            colr = C["good"] if a["ok"] else C["warn"]
+            label = a["type"] if a["ok"] else a["type"] + " REJECTED"
+            A(f'<tr style="border-top:1px solid {C["line"]};">'
+              f'<td style="padding:9px 4px;color:{C["dim"]};font-size:11px;width:78px;">'
+              f'{a["ts"]:%d %b %H:%M}</td>'
+              f'<td style="color:{colr};font-size:10px;font-weight:700;width:110px;">{label}</td>'
+              f'<td style="color:{C["txt"]};">{html.escape(a["what"])}'
+              + (f'<span style="color:{C["dim"]};font-size:11px;"> &middot; '
+                 f'{html.escape(a["note"])}</span>' if a["note"] else "")
+              + '</td></tr>')
+        A('</table>')
+    else:
+        A(f'<div style="color:{C["dim"]};font-size:13px;">'
+          f'Nothing applied in this window.</div>')
+
+    # --- what it decided against -----------------------------------------
+    A(f'<div style="color:{C["txt"]};font-size:13px;font-weight:700;letter-spacing:1px;'
+      f'margin:26px 0 10px;">CONSIDERED, NOT TAKEN</div>'
+      f'<div style="color:{C["dim"]};font-size:12px;line-height:1.55;margin-bottom:10px;">'
+      f'{html.escape(decision["why"])}</div>')
+    if decision["top"]:
+        A('<table width="100%" cellspacing="0" cellpadding="0" '
+          'style="border-collapse:collapse;font-size:13px;">')
+        for c in decision["top"]:
+            A(f'<tr style="border-top:1px solid {C["line"]};">'
+              f'<td style="padding:8px 4px;color:{C["dim"]};">'
+              f'{html.escape(c["out"])} &rarr; <span style="color:{C["txt"]};">'
+              f'{html.escape(c["in"])}</span></td>'
+              f'<td align="right" style="color:{C["accent"]};font-weight:700;">'
+              f'+{c["gain"]:.1f} EP</td>'
+              f'<td align="right" style="color:{C["dim"]};font-size:11px;width:64px;">'
+              f'{c["cost"]:+.1f}m</td></tr>')
+        A('</table>')
+
+    # --- proof of life ---------------------------------------------------
+    runs = " &middot; ".join(f'{t:%d %b %H:%M}' for t in hb["runs"][:4]) or "no runs recorded yet"
+    tok = f'{hb["token_hours"]:.1f}h' if hb["token_hours"] is not None else "unknown"
+    A(f'<div style="margin-top:26px;padding:14px 16px;background:{C["bg"]};'
+      f'border-left:3px solid {C["good"]};border-radius:6px;">'
+      f'<div style="color:{C["good"]};font-size:11px;font-weight:700;letter-spacing:1px;">'
+      f'PIPELINE HEALTHY</div>'
+      f'<div style="color:{C["dim"]};font-size:12px;line-height:1.6;margin-top:6px;">'
+      f'Last runs (UTC): {runs}<br>'
+      f'Auth token valid {tok} &middot; {hb["reports"]} daily reports on disk &middot; '
+      f'{decision["free_transfers"]} free transfer(s), &pound;{decision["bank"]:.1f}m banked'
+      f'</div></div>')
 
     A(f'</div><div style="background:{C["card"]};border:1px solid {C["line"]};border-top:none;'
       f'border-radius:0 0 14px 14px;padding:16px 24px;">'
@@ -320,6 +398,7 @@ def main():
     if args.setup_smtp:
         setup_smtp(args.address, args.password)
         return
+    fpl_activity.beat()
     body, gw, total, rank, pct = build()
     (ROOT / "email.html").write_text(body, encoding="utf-8")
     print(f"email.html written ({len(body)} bytes)")
