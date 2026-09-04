@@ -20,6 +20,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import fpl_model as M
 import fpl_auto
+import urllib.parse
 import fpl_activity
 import fpl_inbox
 
@@ -37,6 +38,24 @@ def fetch(path):
     return json.load(urllib.request.urlopen(
         urllib.request.Request("https://fantasy.premierleague.com/api/" + path,
                                headers=UA), timeout=30))
+
+
+def _btn(cmd, gw, label, colour, bg, addr):
+    """
+    A mailto: button -- taps like a button, sends like a reply.
+
+    Deliberately not an http link. Mail security scanners and some clients
+    prefetch every URL in a message to check it is safe, so a GET that moved a
+    real team would be fired by a robot reading the inbox. mailto: cannot be
+    prefetched: it opens a composer and waits for a human to press send.
+    """
+    q = urllib.parse.urlencode({"subject": f"Re: FPL GW{gw} command", "body": cmd},
+                               quote_via=urllib.parse.quote)
+    return (f'<a href="mailto:{addr}?{q}" '
+            f'style="display:inline-block;padding:9px 16px;margin:0 6px 6px 0;'
+            f'background:{bg};color:{colour};font-size:13px;font-weight:700;'
+            f'text-decoration:none;border-radius:7px;border:1px solid {colour}44;">'
+            f'{label}</a>')
 
 
 def _why_held(p, r, decision):
@@ -84,6 +103,8 @@ def build():
                    key=lambda r: (r["p"]["element_type"], -r["ep_game"]))
     xi = {r["p"]["id"] for r in sorted(squad, key=lambda r: -r["ep_game"])[:11]}
 
+    addr = (fpl_inbox._load(fpl_inbox.SMTP_FILE, {}).get("address")
+            or "me@example.com")
     acts = fpl_activity.applied(boot)
     decision = fpl_activity.rejected(boot, rows, mine, 6)
     hb = fpl_activity.heartbeat()
@@ -238,27 +259,29 @@ def build():
               f'<td align="right" style="color:{C["accent"]};font-weight:700;">'
               f'+{c["gain"]:.1f} EP</td>'
               f'<td align="right" style="color:{C["dim"]};font-size:11px;width:64px;">'
-              f'{c["cost"]:+.1f}m</td></tr>')
+              f'{c["cost"]:+.1f}m</td></tr>'
+              f'<tr><td></td><td colspan="3" style="padding:2px 4px 10px;">'
+              + _btn(f"DO {i}", gw, f"&#10003;&nbsp; DO IT", C["good"], "#16301f", addr)
+              + _btn(f"NO {i}", gw, "&#10005;&nbsp; Never", C["dim"], "#20242f", addr)
+              + '</td></tr>')
         A('</table>')
         A(f'<div style="margin-top:14px;padding:14px 16px;background:{C["card"]};'
           f'border:1px dashed {C["accent"]};border-radius:8px;">'
           f'<div style="color:{C["accent"]};font-size:11px;font-weight:700;'
           f'letter-spacing:1px;">OWNER OVERRIDE</div>'
-          f'<div style="color:{C["txt"]};font-size:13px;line-height:1.7;margin-top:8px;">'
-          f'<b>Reply to this email</b> with one of these on the first line:<br>'
-          f'<code style="color:{C["accent"]};">DO 1</code> &nbsp;execute proposal 1'
-          f'&nbsp;&nbsp;&middot;&nbsp;&nbsp;'
-          f'<code style="color:{C["accent"]};">NO 1</code> &nbsp;veto it for 14 days<br>'
-          f'<code style="color:{C["accent"]};">HOLD</code> &nbsp;freeze all automatic changes'
-          f'&nbsp;&nbsp;&middot;&nbsp;&nbsp;'
-          f'<code style="color:{C["accent"]};">RESUME</code> &nbsp;unfreeze'
-          f'&nbsp;&nbsp;&middot;&nbsp;&nbsp;'
-          f'<code style="color:{C["accent"]};">STATUS</code></div>'
-          f'<div style="color:{C["dim"]};font-size:11px;margin-top:9px;line-height:1.5;">'
-          f'Picked up on the next run (08:00 / 20:00 / 23:30 UTC) and re-checked against '
-          f'live prices and fitness before anything is applied. Ignore this and the engine '
-          f'carries on by itself &mdash; the override is yours to use, not to maintain.'
-          f'</div></div>')
+          f'<div style="color:{C["txt"]};font-size:13px;line-height:1.6;margin:8px 0 12px;">'
+          f'Tap a button above to approve or reject a swap. Your mail app opens '
+          f'with the reply written &mdash; just press send.</div>'
+          + _btn("HOLD", gw, "&#9208;&nbsp; Freeze everything", C["warn"], "#2e2312", addr)
+          + _btn("RESUME", gw, "&#9654;&nbsp; Unfreeze", C["dim"], "#20242f", addr)
+          + _btn("STATUS", gw, "&#8635;&nbsp; Status", C["dim"], "#20242f", addr)
+          + f'<div style="color:{C["dim"]};font-size:11px;margin-top:9px;line-height:1.5;">'
+            f'Or reply by hand with <code>DO 1</code> / <code>NO 1</code> / <code>HOLD</code> '
+            f'on the first line &mdash; the buttons only pre-write that for you.<br>'
+            f'Picked up on the next run (08:00 / 20:00 / 23:30 UTC) and re-checked against '
+            f'live prices and fitness before anything is applied. Ignore this and the engine '
+            f'carries on by itself &mdash; the override is yours to use, not to maintain.'
+            f'</div></div>')
 
     # --- proof of life ---------------------------------------------------
     runs = " &middot; ".join(f'{t:%d %b %H:%M}' for t in hb["runs"][:4]) or "no runs recorded yet"

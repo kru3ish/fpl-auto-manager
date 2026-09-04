@@ -144,16 +144,39 @@ def _first_command(text):
     return None, None
 
 
+def _manifest_issued():
+    try:
+        return datetime.datetime.fromisoformat(_load(PENDING, {})["issued"])
+    except (KeyError, ValueError):
+        return None
+
+
+def _sent_at(msg):
+    try:
+        return email.utils.parsedate_to_datetime(msg.get("Date", ""))
+    except (TypeError, ValueError):
+        return None
+
+
 def poll(apply=False):
     """Read unread replies and return the commands found, newest last."""
     box, addr = _connect()
     found = []
     try:
         box.select("INBOX")
-        typ, data = box.search(None, '(UNSEEN SUBJECT "FPL GW")')
+        # Gmail's IMAP SUBJECT search tokenises rather than matching substrings,
+        # so 'FPL GW' finds nothing against 'Re: FPL GW3 command' -- GW and GW3
+        # are different tokens. Search by sender and date, filter the subject
+        # here. UNSEEN is not usable either: mail you send yourself arrives
+        # already flagged \Seen, so every button press looked read. The
+        # Message-ID ledger, not the read flag, is what stops re-execution.
+        since = (datetime.datetime.now(datetime.timezone.utc)
+                 - datetime.timedelta(days=3)).strftime("%d-%b-%Y")
+        typ, data = box.search(None, f'(FROM "{addr}" SINCE {since})')
         if typ != "OK":
             return found
         seen = set(_load(SEEN, []))
+        issued = _manifest_issued()
         for num in data[0].split():
             typ, raw = box.fetch(num, "(RFC822)")
             if typ != "OK":
@@ -161,9 +184,19 @@ def poll(apply=False):
             msg = email.message_from_bytes(raw[0][1])
             sender = email.utils.parseaddr(msg.get("From", ""))[1].lower()
             mid = msg.get("Message-ID", "")
+            subj = msg.get("Subject", "")
 
-            # Only the owner's own address, and only once per message.
-            if sender != addr.lower() or mid in seen:
+            # Only the owner's own address, only once per message, only replies
+            # to a briefing.
+            if sender != addr.lower() or mid in seen or "FPL" not in subj.upper():
+                continue
+
+            # And only commands written after the proposals they refer to. The
+            # numbers are re-issued every briefing, so an old "DO 1" left in the
+            # mailbox would otherwise execute against whatever is first on
+            # today's list -- the exact mismatch the manifest exists to prevent.
+            when = _sent_at(msg)
+            if issued and when and when < issued:
                 continue
             verb, idx = _first_command(_body(msg))
             if not verb:
