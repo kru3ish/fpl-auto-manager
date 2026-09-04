@@ -218,26 +218,45 @@ def action_headline():
 
 def notify_desktop(title, message):
     """
-    Delivery path of last resort. Email needs a credential; a toast on the
-    machine that just ran the job needs nothing. If SMTP is not configured the
-    briefing still has to reach a human somehow -- a report written to disk that
-    nobody is told about is the same as no report at all.
+    Delivery path of last resort. Email needs a credential; a notification on
+    the machine that just ran the job needs nothing.
+
+    Uses the real toast API rather than a NotifyIcon balloon tip. Balloon tips
+    are transient -- they show for a few seconds, leave nothing behind, and are
+    swallowed entirely by Do Not Disturb. A toast persists in Action Center
+    until dismissed, which is the difference between a notification the user
+    happened to be looking at and one they will actually find.
     """
     import subprocess
+    aumid = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
     ps = (
-        "[void][System.Reflection.Assembly]::LoadWithPartialName('System.Windows.Forms');"
-        "$n=New-Object System.Windows.Forms.NotifyIcon;"
-        "$n.Icon=[System.Drawing.SystemIcons]::Information;"
-        "$n.BalloonTipTitle=" + _ps_quote(title) + ";"
-        "$n.BalloonTipText=" + _ps_quote(message) + ";"
-        "$n.Visible=$true;$n.ShowBalloonTip(20000);Start-Sleep -Seconds 12;$n.Dispose()"
+        "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];"
+        "[void][Windows.Data.Xml.Dom.XmlDocument,Windows.Data.Xml.Dom,ContentType=WindowsRuntime];"
+        "$x=New-Object Windows.Data.Xml.Dom.XmlDocument;"
+        "$x.LoadXml(" + _ps_quote(
+            '<toast scenario="reminder"><visual><binding template="ToastGeneric">'
+            "<text>" + _xml_escape(title) + "</text>"
+            "<text>" + _xml_escape(message) + "</text>"
+            "</binding></visual></toast>") + ");"
+        "$t=New-Object Windows.UI.Notifications.ToastNotification $x;"
+        "$t.Tag='fpl';$t.Group='fpl';"
+        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
+        + _ps_quote(aumid) + ").Show($t)"
     )
     try:
-        subprocess.run(["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps],
-                       timeout=40, capture_output=True)
-        return True
-    except Exception:
-        return False
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           timeout=40, capture_output=True, text=True)
+        if r.returncode == 0:
+            return True
+        print("  toast failed: " + (r.stderr or "").strip()[:200])
+    except Exception as exc:
+        print(f"  toast failed: {exc}")
+    return False
+
+
+def _xml_escape(v):
+    return (str(v).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
 
 
 def _ps_quote(v):
@@ -333,7 +352,12 @@ def main():
         if notify_desktop(f"FPL GW{gw} - {total} pts, OR {rank:,}", headline):
             print("notified via desktop instead")
         if not SMTP_FILE.exists():
-            mark_sent()
+            # Deliberately NOT marked as sent. --once-daily exists to avoid three
+            # emails a day; a toast is not an email. Marking here meant the 08:00
+            # run consumed the day's only attempt and the 20:00 and 23:30 runs
+            # skipped silently -- so a notification missed at 8am was missed for
+            # good. All three runs notify; they share a toast tag, so Action
+            # Center shows one entry that updates rather than a stack.
             return
         sys.exit(1)
 
