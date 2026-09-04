@@ -536,6 +536,19 @@ def main():
     if args.apply:
         args.auto = True
 
+    # An owner HOLD has to actually stop writes. Reporting the freeze in the
+    # briefing while the engine kept transferring would be worse than having no
+    # override at all -- the analysis still runs, only the writing stops.
+    if args.apply:
+        try:
+            import fpl_inbox
+            if fpl_inbox.is_paused():
+                print("OWNER HOLD in effect - analysing only, no writes. "
+                      "Reply RESUME to re-enable.")
+                args.apply = False
+        except Exception as exc:
+            print(f"could not check owner hold ({exc}); continuing")
+
     cfg = load_state("config", {})
     if args.team:
         cfg["team_id"] = args.team

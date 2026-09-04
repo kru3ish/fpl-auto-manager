@@ -179,9 +179,20 @@ def rejected(boot, rows, mine, horizon=6, free_transfers=None):
             if gain > 0:
                 cands.append({
                     "out": op["web_name"], "in": ip["web_name"],
+                    "out_id": op["id"], "in_id": ip["id"],
+                    "key": f'{op["id"]}>{ip["id"]}',
+                    "label": f'{op["web_name"]} -> {ip["web_name"]}',
                     "gain": gain, "cost": (ip["now_cost"] - sell.get(op["id"], op["now_cost"])) / 10,
                 })
     cands.sort(key=lambda c: -c["gain"])
+
+    # A proposal the owner already said no to should not reappear every morning.
+    try:
+        import fpl_inbox
+        blocked = set(fpl_inbox.vetoed())
+        cands = [c for c in cands if c["key"] not in blocked]
+    except Exception:
+        blocked = set()
 
     best = cands[0]["gain"] if cands else 0.0
     conf = fpl_auto.model_confidence()
@@ -199,8 +210,17 @@ def rejected(boot, rows, mine, horizon=6, free_transfers=None):
     else:
         why = f"Best swap gains {best:.1f} EP and clears the bar — expect it to fire."
 
+    # Best upgrade available for each individual player, so the squad table can
+    # say why each name survived rather than only what the top three swaps were.
+    per = {}
+    for c in cands:
+        if c["gain"] > per.get(c["out_id"], (0, ""))[0]:
+            per[c["out_id"]] = (c["gain"], c["in"])
+
     return {"top": cands[:3], "why": why, "threshold": TRANSFER_THRESHOLD_EP,
-            "free_transfers": free_transfers, "bank": bank / 10}
+            "per_player": per, "confidence": conf,
+            "free_transfers": free_transfers, "bank": bank / 10,
+            "vetoed": len(blocked)}
 
 
 def beat():

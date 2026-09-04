@@ -30,3 +30,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# regenerated on every run; churns the diff and carries live squad state
+email.html

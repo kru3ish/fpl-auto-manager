@@ -21,6 +21,7 @@ if hasattr(sys.stdout, "reconfigure"):
 import fpl_model as M
 import fpl_auto
 import fpl_activity
+import fpl_inbox
 
 ROOT = Path(__file__).resolve().parent
 STATE = ROOT / "state"
@@ -36,6 +37,26 @@ def fetch(path):
     return json.load(urllib.request.urlopen(
         urllib.request.Request("https://fantasy.premierleague.com/api/" + path,
                                headers=UA), timeout=30))
+
+
+def _why_held(p, r, decision):
+    """
+    One line on why this player is still in the squad.
+
+    "No action needed" is not an answer to that question -- it describes the
+    engine, not the player. This names the actual reason each name survived:
+    either nothing better was affordable, or something was and the bar stopped
+    it.
+    """
+    if p["status"] != "a":
+        return f'<span style="color:#ffb020;">flagged &middot; {html.escape((p.get("news") or "")[:38])}</span>'
+    gain, who = decision.get("per_player", {}).get(p["id"], (0.0, ""))
+    if gain <= 0:
+        return "no affordable upgrade"
+    if gain < decision["threshold"]:
+        return f'best is {html.escape(who)} +{gain:.1f} &mdash; under bar'
+    return (f'<span style="color:#ffb020;">{html.escape(who)} +{gain:.1f} '
+            f'&middot; held at {int(decision["confidence"] * 100)}% conf</span>')
 
 
 def _fdr_col(d):
@@ -132,7 +153,8 @@ def build():
       f'<tr style="color:{C["dim"]};font-size:10px;letter-spacing:1px;">'
       f'<th align="left" style="padding:6px 4px;">PLAYER</th><th align="left">POS</th>'
       f'<th align="right">EP/GW</th><th align="right">DEFCON</th>'
-      f'<th align="left" style="padding-left:12px;">NEXT 4</th></tr>')
+      f'<th align="left" style="padding-left:12px;">NEXT 4</th>'
+      f'<th align="left" style="padding-left:12px;">WHY HELD</th></tr>')
 
     for r in squad:
         p = r["p"]
@@ -152,7 +174,9 @@ def build():
           f'<td align="right" style="color:{C["accent"] if start else C["dim"]};font-weight:700;">'
           f'{r["ep_game"]:.2f}</td>'
           f'<td align="right" style="color:{C["dim"]};font-size:11px;">{dc:.2f}</td>'
-          f'<td style="padding-left:12px;color:{C["dim"]};font-size:11px;">{run}</td></tr>')
+          f'<td style="padding-left:12px;color:{C["dim"]};font-size:11px;">{run}</td>'
+          f'<td style="padding-left:12px;color:{C["dim"]};font-size:11px;">'
+          f'{_why_held(p, r, decision)}</td></tr>')
 
     A(f'<tr style="border-top:2px solid {C["line"]};">'
       f'<td style="padding:10px 4px;color:{C["txt"]};font-weight:700;">SQUAD TOTAL</td><td></td>'
@@ -201,10 +225,13 @@ def build():
       f'<div style="color:{C["dim"]};font-size:12px;line-height:1.55;margin-bottom:10px;">'
       f'{html.escape(decision["why"])}</div>')
     if decision["top"]:
+        fpl_inbox.save_manifest(decision["top"], gw)
         A('<table width="100%" cellspacing="0" cellpadding="0" '
           'style="border-collapse:collapse;font-size:13px;">')
-        for c in decision["top"]:
+        for i, c in enumerate(decision["top"], 1):
             A(f'<tr style="border-top:1px solid {C["line"]};">'
+              f'<td style="padding:8px 6px 8px 4px;color:{C["accent"]};font-weight:800;'
+              f'width:22px;">{i}</td>'
               f'<td style="padding:8px 4px;color:{C["dim"]};">'
               f'{html.escape(c["out"])} &rarr; <span style="color:{C["txt"]};">'
               f'{html.escape(c["in"])}</span></td>'
@@ -213,6 +240,25 @@ def build():
               f'<td align="right" style="color:{C["dim"]};font-size:11px;width:64px;">'
               f'{c["cost"]:+.1f}m</td></tr>')
         A('</table>')
+        A(f'<div style="margin-top:14px;padding:14px 16px;background:{C["card"]};'
+          f'border:1px dashed {C["accent"]};border-radius:8px;">'
+          f'<div style="color:{C["accent"]};font-size:11px;font-weight:700;'
+          f'letter-spacing:1px;">OWNER OVERRIDE</div>'
+          f'<div style="color:{C["txt"]};font-size:13px;line-height:1.7;margin-top:8px;">'
+          f'<b>Reply to this email</b> with one of these on the first line:<br>'
+          f'<code style="color:{C["accent"]};">DO 1</code> &nbsp;execute proposal 1'
+          f'&nbsp;&nbsp;&middot;&nbsp;&nbsp;'
+          f'<code style="color:{C["accent"]};">NO 1</code> &nbsp;veto it for 14 days<br>'
+          f'<code style="color:{C["accent"]};">HOLD</code> &nbsp;freeze all automatic changes'
+          f'&nbsp;&nbsp;&middot;&nbsp;&nbsp;'
+          f'<code style="color:{C["accent"]};">RESUME</code> &nbsp;unfreeze'
+          f'&nbsp;&nbsp;&middot;&nbsp;&nbsp;'
+          f'<code style="color:{C["accent"]};">STATUS</code></div>'
+          f'<div style="color:{C["dim"]};font-size:11px;margin-top:9px;line-height:1.5;">'
+          f'Picked up on the next run (08:00 / 20:00 / 23:30 UTC) and re-checked against '
+          f'live prices and fitness before anything is applied. Ignore this and the engine '
+          f'carries on by itself &mdash; the override is yours to use, not to maintain.'
+          f'</div></div>')
 
     # --- proof of life ---------------------------------------------------
     runs = " &middot; ".join(f'{t:%d %b %H:%M}' for t in hb["runs"][:4]) or "no runs recorded yet"
@@ -225,7 +271,11 @@ def build():
       f'Last runs (UTC): {runs}<br>'
       f'Auth token valid {tok} &middot; {hb["reports"]} daily reports on disk &middot; '
       f'{decision["free_transfers"]} free transfer(s), &pound;{decision["bank"]:.1f}m banked'
-      f'</div></div>')
+      + (f'<br><span style="color:{C["warn"]};">AUTOMATIC CHANGES ARE ON HOLD &mdash; '
+         f'reply RESUME to re-enable.</span>' if fpl_inbox.is_paused() else "")
+      + (f'<br>{decision["vetoed"]} proposal(s) vetoed and suppressed.'
+         if decision.get("vetoed") else "")
+      + f'</div></div>')
 
     A(f'</div><div style="background:{C["card"]};border:1px solid {C["line"]};border-top:none;'
       f'border-radius:0 0 14px 14px;padding:16px 24px;">'
