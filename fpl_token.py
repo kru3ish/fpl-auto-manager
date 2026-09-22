@@ -222,7 +222,59 @@ def _profile_relogin():
     return found.get("tok")
 
 
+def _refresh_lock(timeout=90):
+    """
+    Serialise refreshes across processes.
+
+    Two schedules call this: the command poller every 20 minutes and the daily
+    run three times a day. They overlap, and a refresh ROTATES the refresh token
+    -- so if both read the same one and both exchange it, the loser is left
+    holding a token the server has already consumed and auth dies silently until
+    somebody notices no emails. That is exactly the failure this project spent a
+    week chasing, and an access-token life of one hour makes the refreshes
+    frequent enough for the race to be a matter of time rather than luck.
+    """
+    import os
+    import time
+
+    lock = STATE / "refresh.lock"
+    STATE.mkdir(exist_ok=True)
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return lock
+        except FileExistsError:
+            # A crashed run must not lock the pipeline out forever.
+            try:
+                if time.time() - lock.stat().st_mtime > 300:
+                    lock.unlink()
+                    continue
+            except OSError:
+                continue
+            if time.time() > deadline:
+                raise RuntimeError("refresh lock held too long")
+            time.sleep(2)
+
+
 def do_refresh(force=False):
+    try:
+        lock = _refresh_lock()
+    except RuntimeError as e:
+        print(f"skipping refresh: {e}")
+        return True          # another process is doing it; not an error
+    try:
+        return _do_refresh_locked(force)
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
+def _do_refresh_locked(force=False):
     d = _read()
     rt = d.get("refresh_token")
     if not rt:
