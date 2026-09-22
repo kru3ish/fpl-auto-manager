@@ -23,6 +23,7 @@ import fpl_auto
 import re
 import urllib.parse
 import fpl_activity
+import fpl_flow
 import fpl_inbox
 
 ROOT = Path(__file__).resolve().parent
@@ -339,6 +340,72 @@ def build(banner=None):
          f'can be banked.' if not left else
          f'{left} free transfer(s) in hand. Unused ones roll over, up to five banked.')
       + f'</div>')
+
+    # --- what the news layer found ---------------------------------------
+    try:
+        jd = json.loads((ROOT / "state" / "judge.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        jd = None
+    if jd:
+        failed = jd.get("_failed")
+        col = C["warn"] if failed else C["accent"]
+        A(f'<div style="color:{C["txt"]};font-size:13px;font-weight:700;letter-spacing:1px;'
+          f'margin:26px 0 10px;">NEWS LAYER</div>'
+          f'<div style="padding:14px 16px;background:{C["bg"]};border-left:3px solid {col};'
+          f'border-radius:6px;">'
+          f'<div style="color:{C["txt"]};font-size:13px;line-height:1.6;">'
+          f'{html.escape(str(jd.get("overall", ""))[:600])}</div>')
+        for pl in (jd.get("players") or [])[:4]:
+            A(f'<div style="margin-top:10px;color:{C["dim"]};font-size:12px;line-height:1.55;">'
+              f'<b style="color:{C["warn"]};">{html.escape(pl.get("name", "?"))} &middot; '
+              f'{html.escape(pl.get("verdict", ""))}</b><br>'
+              f'{html.escape(pl.get("reason", "")[:300])}<br>'
+              f'<span style="font-size:10px;">{html.escape(pl.get("source", "")[:90])}</span></div>')
+        A('</div>')
+
+    # --- what everyone else is doing --------------------------------------
+    try:
+        fl = fpl_flow.flows(boot, mine)
+    except Exception:
+        fl = None
+    if fl and (fl["bandwagon"] or fl["exodus"]):
+        A(f'<div style="color:{C["txt"]};font-size:13px;font-weight:700;letter-spacing:1px;'
+          f'margin:26px 0 6px;">CROWD MOVEMENT</div>'
+          f'<div style="color:{C["dim"]};font-size:11px;margin-bottom:10px;line-height:1.5;">'
+          f'Real transfers by the whole playerbase this gameweek &mdash; behaviour, not '
+          f'opinion. Rank only moves when you differ from it.</div>'
+          f'<table width="100%" cellspacing="0" cellpadding="0" '
+          f'style="border-collapse:collapse;font-size:13px;">')
+        if fl["bandwagon"]:
+            A(f'<tr><td colspan="4" style="padding:6px 4px;color:{C["dim"]};font-size:10px;'
+              f'letter-spacing:1px;">BANDWAGONS YOU ARE NOT ON</td></tr>')
+            for r in fl["bandwagon"][:4]:
+                A(f'<tr style="border-top:1px solid {C["line"]};">'
+                  f'<td style="padding:8px 4px;color:{C["txt"]};">{html.escape(r["name"])}'
+                  f'<span style="color:{C["dim"]};font-size:11px;"> {r["pos"]} &middot; '
+                  f'{r["club"]} &middot; &pound;{r["cost"]:.1f}m</span></td>'
+                  f'<td align="right" style="color:{C["dim"]};font-size:11px;">'
+                  f'{r["own"]:.1f}% owned</td>'
+                  f'<td align="right" style="color:{C["good"]};font-weight:700;">'
+                  f'{r["net"]:+,}</td>'
+                  f'<td align="right" style="color:{C["dim"]};font-size:11px;width:56px;">'
+                  f'{r["momentum"]:+.0%}</td></tr>')
+        if fl["exodus"]:
+            A(f'<tr><td colspan="4" style="padding:12px 4px 6px;color:{C["dim"]};'
+              f'font-size:10px;letter-spacing:1px;">BEING SOLD OUT OF YOUR SQUAD</td></tr>')
+            for r in fl["exodus"][:4]:
+                A(f'<tr style="border-top:1px solid {C["line"]};">'
+                  f'<td style="padding:8px 4px;color:{C["txt"]};">{html.escape(r["name"])}'
+                  + (f'<span style="color:{C["warn"]};font-size:11px;"> &middot; '
+                     f'{html.escape(r["news"][:44])}</span>' if r["news"] else "")
+                  + f'</td>'
+                  f'<td align="right" style="color:{C["dim"]};font-size:11px;">'
+                  f'{r["own"]:.1f}% owned</td>'
+                  f'<td align="right" style="color:{C["warn"]};font-weight:700;">'
+                  f'{r["net"]:+,}</td>'
+                  f'<td align="right" style="color:{C["dim"]};font-size:11px;width:56px;">'
+                  f'{r["momentum"]:+.0%}</td></tr>')
+        A('</table>')
 
     # --- proof of life ---------------------------------------------------
     runs = " &middot; ".join(f'{t:%d %b %H:%M}' for t in hb["runs"][:4]) or "no runs recorded yet"

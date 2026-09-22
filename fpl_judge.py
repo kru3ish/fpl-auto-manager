@@ -196,9 +196,7 @@ def build_context(horizon=6):
     }, links, gw
 
 
-def judge(context, links, model=MODEL, effort="high"):
-    client = anthropic.Anthropic()
-
+def build_prompt(context, links):
     urls = "\n".join(f"- {u}" for u in links) if links else "(none)"
     prompt = f"""Here is my FPL squad, the model's expected-points figures, and the
 news the API is carrying. The deadline is {context['deadline']}.
@@ -216,6 +214,66 @@ Full context:
 
 Tell me only what the numbers do not already show. If nothing material has
 happened, say so plainly — that is the expected answer most days."""
+
+    return prompt
+
+
+def judge_via_claude_code(context, links, timeout=420):
+    """
+    Run the judge through headless Claude Code instead of the Anthropic API.
+
+    The API path bills per call, which is why this module sat in no schedule for
+    weeks and never ran once. This path runs on the Claude subscription already
+    being paid for -- the difference between a news layer that runs every day and
+    one that exists only as a file on disk.
+
+    The prompt travels by file, not argv: the context is a large JSON document
+    and a Windows command line will truncate and mangle it.
+
+    Fails SOFT and loudly. The judge is advisory and veto-only by design, so a
+    news layer being down must never stop the engine from managing the team --
+    but it has to SAY it is down, rather than resemble a quiet day with no news.
+    """
+    import subprocess
+
+    STATE.mkdir(exist_ok=True)
+    pf = STATE / "judge_prompt.txt"
+    pf.write_text(
+        SYSTEM
+        + "\n\n"
+        + build_prompt(context, links)
+        + "\n\nReturn ONLY a JSON object matching this schema."
+          " No prose, no code fence:\n"
+        + json.dumps(VERDICT_SCHEMA),
+        encoding="utf-8")
+
+    try:
+        r = subprocess.run(
+            ["claude", "-p", pf.read_text(encoding="utf-8"),
+             "--allowedTools", "WebSearch", "WebFetch"],
+            capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("claude -p timed out after %ss" % timeout)
+    except FileNotFoundError:
+        raise RuntimeError("claude CLI not on PATH")
+    if r.returncode != 0:
+        raise RuntimeError("claude -p exited %s: %s"
+                           % (r.returncode, (r.stderr or "")[:300]))
+
+    raw = (r.stdout or "").strip()
+    # Tolerate a code fence or surrounding prose rather than failing on format.
+    a, b = raw.find("{"), raw.rfind("}")
+    if a < 0 or b <= a:
+        raise RuntimeError("no JSON object in response: %s" % raw[:200])
+    out = json.loads(raw[a:b + 1])
+    out["_usage"] = {"model": "claude-code-subscription", "input": 0, "output": 0}
+    return out
+
+
+def judge(context, links, model=MODEL, effort="high"):
+    client = anthropic.Anthropic()
+    prompt = build_prompt(context, links)
 
     resp = client.messages.create(
         model=model,
@@ -278,6 +336,13 @@ def save(verdict):
                    indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def if_soft(soft):
+    """Exit 0 when advisory, non-zero when a human asked directly."""
+    if not soft:
+        sys.exit(1)
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser(description="LLM judgment layer over the EP model")
     ap.add_argument("--model", default=MODEL)
@@ -285,10 +350,31 @@ def main():
                     choices=["low", "medium", "high", "xhigh", "max"])
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     ap.add_argument("--horizon", type=int, default=6)
+    ap.add_argument("--max-age-hours", type=float, default=0,
+                    help="skip entirely if the last verdict is younger than this. "
+                         "The scheduler fires three times a day and each run does "
+                         "live web searches; team news does not change hourly.")
+    ap.add_argument("--via-claude-code", action="store_true",
+                    help="run headless through Claude Code on the subscription you "
+                         "already pay for, instead of billing the API per call")
+    ap.add_argument("--soft", action="store_true",
+                    help="never exit non-zero; the judge is advisory and must not "
+                         "break the daily run")
     ap.add_argument("--context", action="store_true",
                     help="write the context file and print a prompt to paste into "
                          "Claude Code — costs nothing, uses your existing subscription")
     args = ap.parse_args()
+
+    if args.max_age_hours:
+        try:
+            prev = json.loads((STATE / "judge.json").read_text(encoding="utf-8"))
+            age = (datetime.now(timezone.utc)
+                   - datetime.fromisoformat(prev["at"])).total_seconds() / 3600.0
+            if age < args.max_age_hours and not prev.get("_failed"):
+                print(f"judge verdict is {age:.1f}h old - skipping")
+                return
+        except (OSError, ValueError, KeyError):
+            pass
 
     context, links, gw = build_context(args.horizon)
 
@@ -317,11 +403,21 @@ Recommend benching, never selling; you're advising, not deciding.""")
         return
 
     try:
-        verdict = sanitise(judge(context, links, args.model, args.effort))
-    except anthropic.AuthenticationError:
-        sys.exit("No API credentials. Set ANTHROPIC_API_KEY or run: ant auth login")
+        if args.via_claude_code:
+            verdict = sanitise(judge_via_claude_code(context, links))
+        else:
+            verdict = sanitise(judge(context, links, args.model, args.effort))
     except Exception as e:
-        sys.exit(f"judge failed: {type(e).__name__}: {e}")
+        msg = f"judge unavailable: {type(e).__name__}: {e}"
+        if isinstance(e, anthropic.AuthenticationError):
+            msg = ("judge unavailable: no API credentials. Use --via-claude-code "
+                   "to run on your subscription instead.")
+        # A judge that is down has to look different from a quiet news day, or
+        # its silence reads as "nothing to report". Record the outage so the
+        # briefing can show it, then let the engine carry on without it.
+        save({"overall": msg, "confidence": "none", "players": [], "_failed": True})
+        print(msg)
+        return if_soft(args.soft)
 
     save(verdict)
 

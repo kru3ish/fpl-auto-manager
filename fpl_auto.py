@@ -43,6 +43,41 @@ def paused() -> bool:
     return PAUSE.exists()
 
 
+JUDGE_FILE = STATE / "judge.json"
+JUDGE_STALE_DAYS = 3
+
+
+def judge_vetoes():
+    """
+    Players the news layer says should not start, by lowercased name.
+
+    The API's chance-of-playing is a single blunt number and is routinely wrong
+    about WHY. Joao Pedro carried a flat "knee injury - 75%" while the actual
+    scan showed an ACL and MCL strain whose recovery window closed the day AFTER
+    the fixture. No arithmetic on 75 recovers that; only reading the news does.
+
+    Veto-only, by design. A verdict here can push a player OUT of the XI and can
+    never pull one in, so the worst a wrong or hallucinated verdict can do is
+    bench somebody -- which costs a little -- rather than buy somebody, which
+    costs a transfer. sanitise() has already dropped every unsourced claim.
+    """
+    try:
+        data = json.loads(JUDGE_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if data.get("_failed"):
+        return {}
+    try:
+        age = (datetime.now(timezone.utc)
+               - datetime.fromisoformat(data["at"])).days
+    except (KeyError, ValueError):
+        return {}
+    if age > JUDGE_STALE_DAYS:
+        return {}          # a stale read is not evidence about today
+    return {p["name"].lower(): p for p in data.get("players", [])
+            if p.get("verdict") in {"bench", "urgent"} and p.get("source")}
+
+
 def is_out(cop):
     """Will not feature. Never start him."""
     return cop <= SELL_THRESHOLD
@@ -176,9 +211,19 @@ def plan_lineup(team, elements_by_id, fixtures_by_team, ep_by_id):
     # it rather than assuming a flag means bench.
     bench_best = max((s["ep"] for s in squad if not s["was_start"] and s["playable"]),
                      default=None)
+    vetoes = judge_vetoes()
     demote, notes = [], []
     for x in squad:
-        if not (x["was_start"] and x["playable"] and x["flagged"]):
+        if not x["was_start"] or not x["playable"]:
+            continue
+        veto = vetoes.get(x["name"].lower())
+        if veto:
+            # The news beats the number. A sourced "do not start" outranks the
+            # cop arithmetic, because cop is exactly what the news corrects.
+            notes.append(f'{x["name"]}: bench — news layer: {veto["reason"][:180]}')
+            demote.append(x)
+            continue
+        if not x["flagged"]:
             continue
         keep, why = keep_flagged_starter(x["ep"], bench_best, x["cop"])
         notes.append(f'{x["name"]} ({x["cop"]:.0f}%): {"keep" if keep else "bench"} — {why}')
