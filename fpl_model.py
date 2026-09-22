@@ -295,10 +295,15 @@ def minutes_profile(p):
         else:
             p60_given_start = 0.25
 
+    # FPL's chance-of-playing IS the doubt, stated as a number. Applying it and
+    # then halving again for the non-available status that produced it counts one
+    # injury twice: a published "75% chance of playing" became 37.5%, and a
+    # 7.7m starting forward was ranked below 4.5m bench fodder. The extra
+    # discount belongs only to a flag carrying no percentage at all.
     cop = p["chance_of_playing_next_round"]
     if cop is not None:
         p_start *= cop / 100.0
-    if p["status"] != "a":
+    elif p["status"] != "a":
         p_start *= 0.5
 
     p_start = max(0.0, min(1.0, p_start))

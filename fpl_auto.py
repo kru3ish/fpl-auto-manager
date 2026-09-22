@@ -32,7 +32,7 @@ PAUSE = STATE / "PAUSE"
 POS = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD"}
 
 SELL_THRESHOLD = 25       # CoP at or below this is a sell candidate
-BENCH_THRESHOLD = 75      # CoP below this should not start
+BENCH_THRESHOLD = 75      # CoP at or below this is doubtful (75 is FPL's commonest flag)
 MIN_FORMATION = {"GK": 1, "DEF": 3, "FWD": 1}
 MIN_TRANSFER_GAIN = 1.5   # expected points over the horizon, else hold
 PRICE_FALL_GUARD = -60000 # net transfers that signal an imminent price drop
@@ -41,6 +41,52 @@ MAX_PER_CLUB = 3
 
 def paused() -> bool:
     return PAUSE.exists()
+
+
+def is_out(cop):
+    """Will not feature. Never start him."""
+    return cop <= SELL_THRESHOLD
+
+
+def is_doubtful(cop):
+    """
+    Carrying a real doubt.
+
+    Compared with <= deliberately. This read `cop < BENCH_THRESHOLD` against a
+    threshold of 75, so a chance of exactly 75 -- the value FPL publishes more
+    often than any other -- passed the check as fully fit and was never
+    reconsidered.
+    """
+    return cop <= BENCH_THRESHOLD
+
+
+def keep_flagged_starter(ep_flagged, ep_bench_best, cop):
+    """
+    Should a doubtful starter keep his place? Usually yes, because of auto-subs.
+
+    If he plays no minutes FPL substitutes the best eligible bench player
+    automatically, so starting him is a free option: his upside when he features,
+    the bench player's points when he does not. Benching him throws that option
+    away and collects only the bench player.
+
+        EV(start him)  = ep_flagged + P(no minutes) x ep_bench
+        EV(bench him)  = ep_bench
+
+    which reduces to benching only when  ep_bench x cop/100 > ep_flagged.
+    ep_flagged already embeds the chance of playing, so no further discount here.
+
+    The leak auto-subs do not cover is a player who features but is short of
+    fitness -- twenty minutes and one point triggers no substitution. That is
+    priced by cop already lowering ep_flagged, not by a second penalty.
+    """
+    if ep_bench_best is None:
+        return True, "no playable bench alternative"
+    if ep_bench_best * (cop / 100.0) > ep_flagged:
+        return False, (f"bench {ep_bench_best:.2f} EP beats {ep_flagged:.2f} EP even "
+                       f"after auto-subs at {cop:.0f}% fitness")
+    return True, (f"auto-subs make starting him worth "
+                  f"{ep_flagged + (1 - cop / 100.0) * ep_bench_best:.2f} EP vs "
+                  f"{ep_bench_best:.2f} EP benched — the bench covers a no-show")
 
 
 def _cop(p):
@@ -93,15 +139,18 @@ def plan_lineup(team, elements_by_id, fixtures_by_team, ep_by_id):
         score = _rank_score(p, ep_by_id.get(p["id"], 0.0), conf)
         if not has_fixture:
             score -= 50                      # blank gameweek: bench him
-        if cop <= SELL_THRESHOLD:
-            score -= 100                     # out: never start
-        elif cop < BENCH_THRESHOLD:
-            score -= 20                      # doubtful: strongly prefer benching
+        if is_out(cop):
+            score -= 100                     # will not feature: never start
+        # No flat penalty for a mere doubt. expected_points already scales by
+        # chance-of-playing, so subtracting another fixed 20 counted the same
+        # injury a third time and benched a doubtful player regardless of whether
+        # the alternative was any good. keep_flagged_starter weighs that instead.
 
         squad.append({
             "element": p["id"], "pos": POS[p["element_type"]], "score": score,
             "cop": cop, "name": p["web_name"], "was_start": pk["position"] <= 11,
-            "was_pos": pk["position"], "playable": cop > SELL_THRESHOLD and has_fixture,
+            "was_pos": pk["position"], "playable": not is_out(cop) and has_fixture,
+            "flagged": is_doubtful(cop) and has_fixture, "ep": ep_by_id.get(p["id"], 0.0),
         })
 
     # MINIMAL INTERVENTION.
@@ -113,8 +162,43 @@ def plan_lineup(team, elements_by_id, fixtures_by_team, ep_by_id):
     # made that fodder vice-captain. A lineup change is only justified when
     # somebody in the XI genuinely cannot play.
     unplayable = [x for x in squad if x["was_start"] and not x["playable"]]
-    if not unplayable:
-        return None, []
+
+    # A flagged starter is not an unplayable one, and this gate only knew the
+    # second kind: it returned before ranking anything unless somebody literally
+    # could not play, so a doubtful starter was never reconsidered at all. Joao
+    # Pedro carried a 75% knee flag for six days while starting and nothing
+    # looked at him once.
+    #
+    # Opened only by a FLAGGED starter, never by ordinary re-ranking -- free
+    # re-ranking on thin data is what once benched a 12.0m midfielder for 4.5m
+    # fodder and made the fodder vice-captain. And the verdict is usually to keep
+    # him: auto-subs make a doubtful starter a free option, so this reasons about
+    # it rather than assuming a flag means bench.
+    bench_best = max((s["ep"] for s in squad if not s["was_start"] and s["playable"]),
+                     default=None)
+    demote, notes = [], []
+    for x in squad:
+        if not (x["was_start"] and x["playable"] and x["flagged"]):
+            continue
+        keep, why = keep_flagged_starter(x["ep"], bench_best, x["cop"])
+        notes.append(f'{x["name"]} ({x["cop"]:.0f}%): {"keep" if keep else "bench"} — {why}')
+        if not keep:
+            demote.append(x)
+
+    if not unplayable and not demote:
+        # Nothing to change, but say what was weighed. Silence here was the real
+        # complaint: a flagged player in the XI and no word either way.
+        return None, [f"[INFO] {n}" for n in notes]
+
+    for x in demote:
+        # keep_flagged_starter already decided this on expected value, so the
+        # reshuffle must not relitigate it. Without the score penalty it did:
+        # _rank_score blends EP toward PRICE while the model is thin, and a 7.7m
+        # flagged forward outranks a 5.0m fit midfielder on cost alone -- but
+        # price is what he is worth WHEN FIT and says nothing about whether he
+        # features this week.
+        x["playable"] = False
+        x["score"] -= 100
 
     gks = sorted([s for s in squad if s["pos"] == "GK"], key=lambda s: -s["score"])
     outs = sorted([s for s in squad if s["pos"] != "GK"], key=lambda s: -s["score"])
@@ -336,7 +420,14 @@ def run(elements_by_id, teams_by_id, fixtures_by_team, gw, deadline, apply=False
     # ---- lineup
     picks, changes = plan_lineup(team, elements_by_id, fixtures_by_team, ep_by_id)
     if picks is None:
-        out.append("Lineup untouched — everyone in the XI can play "
+        # changes still carries the reasoning for anyone flagged but kept, and
+        # this used to discard it for a canned sentence -- the same failure as
+        # the hardcoded email verdict. A flagged starter with no word either way
+        # is exactly what looks like a dead engine from the outside.
+        out.extend(changes)
+        out.append("Lineup untouched — nobody in the XI needs replacing."
+                   if changes else
+                   "Lineup untouched — everyone in the XI can play "
                    "(the engine only intervenes when someone genuinely can't).")
         return out
     if not changes:
