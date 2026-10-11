@@ -1,0 +1,86 @@
+name: FPL watchdog
+
+# Watches the team from outside the machine that manages it.
+#
+# The local engine runs on a laptop, and a laptop that sleeps takes its own
+# monitoring down with it -- which is how a nine-day outage went unnoticed. This
+# runs on GitHub's infrastructure instead, so the failure it watches for cannot
+# also disable the watching.
+#
+# Needs no secrets of any kind: every FPL endpoint it reads is public, and the
+# only token involved is the one Actions mints for itself to file an issue.
+
+on:
+  schedule:
+    # Every six hours. Deadlines are weekly, so this is frequent enough to leave
+    # time to act and sparse enough to stay free.
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      # No pip install: the watchdog is deliberately stdlib-only, so a broken
+      # dependency cannot take the last line of defence offline.
+      - name: Check the team
+        id: check
+        run: |
+          python watchdog.py --json > result.json
+          python watchdog.py > report.md
+          cat report.md
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          r = json.load(open("result.json"))
+          print("alert=" + str(r["alert"]).lower())
+          print("gw=" + str(r["next_gw"]))
+          PY
+
+      # One issue per gameweek. Creating it is what sends the email; later runs
+      # edit that same issue, so a problem that persists for days does not mean
+      # four notifications a day until the deadline.
+      - name: Raise or update the alert
+        if: steps.check.outputs.alert == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TITLE: "FPL GW${{ steps.check.outputs.gw }}: action needed before the deadline"
+        run: |
+          gh label create fpl-watchdog --color B60205 \
+            --description "Automated pre-deadline team check" 2>/dev/null || true
+          # Title matched in jq rather than through `gh --search`, whose
+          # tokenising is not worth trusting for an exact match.
+          existing=$(gh issue list --state open --limit 50 --json number,title \
+                       --jq ".[] | select(.title == \"${TITLE}\") | .number" \
+                     | head -1)
+          if [ -n "${existing}" ]; then
+            gh issue edit "${existing}" --body-file report.md
+            echo "updated issue #${existing} (no new notification)"
+          else
+            gh issue create --title "${TITLE}" --body-file report.md \
+              --label fpl-watchdog
+          fi
+
+      # Closing it is the all-clear, so a stale red issue is never left implying
+      # a problem that has already been dealt with.
+      - name: Close the alert once the team is clean
+        if: steps.check.outputs.alert == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          open=$(gh issue list --state open --label fpl-watchdog \
+                   --json number --jq '.[].number' || true)
+          for n in ${open}; do
+            gh issue close "${n}" \
+              --comment "Resolved - the watchdog finds no problem in the published XI."
+            echo "closed #${n}"
+          done
