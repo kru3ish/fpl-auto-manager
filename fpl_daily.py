@@ -425,6 +425,32 @@ def check_auth(alerts):
 
 
 def check_deadline(deadline, alerts):
+    # How long was this thing dead? Three separate silent failures on this
+    # project shared one shape: the component that reports health was part of the
+    # component that broke, so an outage looked exactly like a quiet week. The
+    # scheduler refused to start on battery for nine days and said nothing.
+    #
+    # This cannot prevent the next outage -- code that is not running cannot
+    # alert -- but it makes the gap impossible to miss on the run that recovers,
+    # which is the difference between "it stopped ten days ago" and "I think
+    # something broke maybe two days ago".
+    try:
+        import fpl_activity
+        runs = fpl_activity.heartbeat()["runs"]
+        if runs:
+            gap_h = (now_utc() - runs[0]).total_seconds() / 3600
+            if gap_h > 72:
+                alerts.append((RED, "OUTAGE",
+                               f"Pipeline did not run for {gap_h / 24:.1f} DAYS "
+                               f"(last {runs[0]:%d %b %H:%M} UTC). Your team was "
+                               f"unmanaged that whole time — check what you missed."))
+            elif gap_h > 26:
+                alerts.append((AMBER, "OUTAGE",
+                               f"Pipeline gap of {gap_h:.0f}h (last "
+                               f"{runs[0]:%d %b %H:%M} UTC) — expected every ~8h."))
+    except Exception as exc:
+        alerts.append((AMBER, "OUTAGE", f"could not read run history ({exc})"))
+
     left = deadline - now_utc()
     hours = left.total_seconds() / 3600
     if hours < 0:
