@@ -16,6 +16,11 @@ on:
     # time to act and sparse enough to stay free.
     - cron: '0 */6 * * *'
   workflow_dispatch:
+    inputs:
+      force_alert:
+        description: 'Raise an issue even outside the deadline window (to test the alert path)'
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -35,14 +40,20 @@ jobs:
       # dependency cannot take the last line of defence offline.
       - name: Check the team
         id: check
+        env:
+          FORCE: ${{ inputs.force_alert }}
         run: |
           python watchdog.py --json > result.json
           python watchdog.py > report.md
           cat report.md
           python - <<'PY' >> "$GITHUB_OUTPUT"
-          import json
+          import json, os
           r = json.load(open("result.json"))
-          print("alert=" + str(r["alert"]).lower())
+          # The real alert only fires near a deadline, so without a manual
+          # override the notification path can never be exercised on demand --
+          # and an untested alarm is not an alarm.
+          forced = os.environ.get("FORCE") == "true"
+          print("alert=" + str(bool(r["alert"] or forced)).lower())
           print("gw=" + str(r["next_gw"]))
           PY
 
