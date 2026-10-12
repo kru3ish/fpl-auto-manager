@@ -4,3 +4,8 @@ pulp>=2.7
 # Optional. Only needed for `fpl_token.py --login`, the browser fallback used
 # if the DevTools refresh-token route ever fails. Everything else works without it.
 # playwright>=1.40
+
+# Optional. Only for `fpl_judge.py` WITHOUT --via-claude-code, i.e. the paid
+# per-call API path. The default --via-claude-code route runs the news layer on
+# an existing Claude subscription and needs none of this.
+# anthropic>=0.40

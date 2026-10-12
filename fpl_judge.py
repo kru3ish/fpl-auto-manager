@@ -40,10 +40,15 @@ from pathlib import Path
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+# The Anthropic SDK is needed ONLY for the paid API path. Importing it up front
+# with a hard exit meant a fresh clone could not run the judge at all -- not even
+# --via-claude-code, which deliberately avoids the API and runs on an existing
+# Claude subscription. Requiring the API SDK to use the non-API path is backwards,
+# so it is imported where it is actually used.
 try:
     import anthropic
 except ImportError:
-    sys.exit("pip install anthropic")
+    anthropic = None
 
 import fpl_model as M
 
@@ -272,6 +277,9 @@ def judge_via_claude_code(context, links, timeout=420):
 
 
 def judge(context, links, model=MODEL, effort="high"):
+    if anthropic is None:
+        raise RuntimeError("the API path needs `pip install anthropic`; "
+                           "or use --via-claude-code, which needs nothing")
     client = anthropic.Anthropic()
     prompt = build_prompt(context, links)
 
@@ -409,7 +417,7 @@ Recommend benching, never selling; you're advising, not deciding.""")
             verdict = sanitise(judge(context, links, args.model, args.effort))
     except Exception as e:
         msg = f"judge unavailable: {type(e).__name__}: {e}"
-        if isinstance(e, anthropic.AuthenticationError):
+        if anthropic is not None and isinstance(e, anthropic.AuthenticationError):
             msg = ("judge unavailable: no API credentials. Use --via-claude-code "
                    "to run on your subscription instead.")
         # A judge that is down has to look different from a quiet news day, or
